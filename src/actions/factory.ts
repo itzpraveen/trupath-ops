@@ -11,6 +11,7 @@ import { errorMessage, parseForm, zBool, zDate, zEnum, zInt, zOptional, zOptiona
 import { adjustMaterial, round3 } from "@/lib/materials";
 import { nextNumber } from "@/lib/numbering";
 import { adjustStock } from "@/lib/stock";
+import { queueStockPush } from "@/lib/stock-push";
 
 function revalidateFactory() {
   for (const p of ["/factory", "/factory/production", "/factory/materials", "/factory/attendance", "/factory/employees", "/stock", "/"]) revalidatePath(p);
@@ -86,6 +87,7 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
       await audit(tx, { userId: user.id, action: "create", entityType: "production", entityId: entry.id, summary: `${number}: ${d.qty} × ${product.name} ${product.variant}`.trim(), meta: { consumed } });
       return { id: entry.id, number, consumed, product };
     });
+    queueStockPush([d.productId]);
     revalidateFactory();
     const msg = result.consumed.length ? `${result.number} recorded. Materials used: ${result.consumed.join(", ")}` : `${result.number} recorded`;
     return { ok: true, message: msg, id: result.id };
@@ -102,7 +104,7 @@ export async function voidProduction(_prev: ActionState, formData: FormData): Pr
     const parsed = parseForm(voidSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const { id, reason } = parsed.data;
-    await db.transaction(async (tx) => {
+    const productId = await db.transaction(async (tx) => {
       const [entry] = await tx.select().from(productionEntries).where(eq(productionEntries.id, id)).for("update");
       if (!entry) throw new Error("Entry not found");
       if (entry.voidedAt) throw new Error("Already voided");
@@ -113,7 +115,9 @@ export async function voidProduction(_prev: ActionState, formData: FormData): Pr
       }
       await tx.update(productionEntries).set({ voidedAt: new Date(), voidReason: reason }).where(eq(productionEntries.id, id));
       await audit(tx, { userId: user.id, action: "void", entityType: "production", entityId: id, summary: `Voided ${entry.number}: ${reason}` });
+      return entry.productId;
     });
+    queueStockPush([productId]);
     revalidateFactory();
     return { ok: true, message: "Production entry voided and stock reversed" };
   } catch (err) {

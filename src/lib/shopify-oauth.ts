@@ -5,7 +5,31 @@ import { db } from "@/db";
 import { shopifyStores, type ShopifyStore } from "@/db/schema";
 
 /** Admin API scopes the app asks for during install. */
-export const SHOPIFY_SCOPES = ["read_orders", "read_all_orders", "read_products", "read_inventory", "read_customers"] as const;
+export const SHOPIFY_SCOPES = [
+  "read_orders",
+  "read_all_orders",
+  "read_products",
+  "read_inventory",
+  "write_inventory",
+  "read_locations",
+  "read_customers",
+  "read_merchant_managed_fulfillment_orders",
+  "write_merchant_managed_fulfillment_orders",
+] as const;
+export const FULFIL_SCOPE = "write_merchant_managed_fulfillment_orders";
+export const INVENTORY_SCOPES = ["write_inventory", "read_locations"] as const;
+
+export function grantedScopes(scope: string | null | undefined): Set<string> {
+  return new Set((scope ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+}
+export function hasScope(scope: string | null | undefined, name: string) {
+  return grantedScopes(scope).has(name);
+}
+/** Scopes the app wants that the store has not granted yet (reconnect needed). */
+export function missingScopes(scope: string | null | undefined): string[] {
+  const have = grantedScopes(scope);
+  return SHOPIFY_SCOPES.filter((s) => !have.has(s));
+}
 export const WEBHOOK_TOPICS = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "REFUNDS_CREATE", "PRODUCTS_UPDATE"] as const;
 
 export type StoreAuth = {
@@ -18,6 +42,9 @@ export type StoreAuth = {
   entityId: string;
   channel: string;
   baselineAt: Date | null;
+  scope: string;
+  pushInventory: boolean;
+  locationId: string | null;
 };
 
 /* ---------------- encryption ---------------- */
@@ -95,20 +122,21 @@ export function storeToken(store: ShopifyStore): string | null {
 export function storeAuth(store: ShopifyStore): StoreAuth | null {
   const token = storeToken(store);
   if (!token || !store.active) return null;
-  return { storeId: store.id, shop: store.shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt };
+  return { storeId: store.id, shop: store.shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt, scope: store.scope ?? "", pushInventory: store.pushInventory, locationId: store.locationId };
 }
 
 export async function listConnectedAuths(): Promise<StoreAuth[]> {
   return (await listStores()).map(storeAuth).filter((a): a is StoreAuth => !!a);
 }
 
-export async function upsertStore(input: { id?: string; shop: string; label: string; brandId: string; entityId: string; channel: string; clientId?: string | null; clientSecret?: string | null; active?: boolean }) {
+export async function upsertStore(input: { id?: string; shop: string; label: string; brandId: string; entityId: string; channel: string; clientId?: string | null; clientSecret?: string | null; active?: boolean; pushInventory?: boolean }) {
   const values = {
     shop: input.shop.toLowerCase(),
     label: input.label,
     brandId: input.brandId,
     entityId: input.entityId,
     channel: input.channel,
+    ...(input.pushInventory !== undefined ? { pushInventory: input.pushInventory } : {}),
     ...(input.clientId !== undefined ? { clientId: input.clientId || null } : {}),
     ...(input.clientSecret ? { clientSecretEnc: encryptSecret(input.clientSecret) } : {}),
     ...(input.active !== undefined ? { active: input.active } : {}),
@@ -128,6 +156,10 @@ export async function saveStoreToken(storeId: string, data: { token: string; sco
     .update(shopifyStores)
     .set({ tokenEnc: encryptSecret(data.token), scope: data.scope, webhooks: data.webhooks, installedAt: now, baselineAt: existing?.baselineAt ?? now })
     .where(eq(shopifyStores.id, storeId));
+}
+
+export async function setStoreLocation(storeId: string, locationId: string) {
+  await db.update(shopifyStores).set({ locationId }).where(eq(shopifyStores.id, storeId));
 }
 
 export async function setStoreWebhooks(storeId: string, webhooks: string[]) {

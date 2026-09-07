@@ -28,7 +28,7 @@ export async function GET(request: NextRequest) {
 
   try {
     const { token, scope } = await exchangeCodeForToken(shop, code, clientId, clientSecret);
-    const auth = { storeId: store.id, shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt };
+    const auth = { storeId: store.id, shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt, scope, pushInventory: store.pushInventory, locationId: store.locationId };
     let webhooks: string[] = [];
     let webhookNote = "";
     try {

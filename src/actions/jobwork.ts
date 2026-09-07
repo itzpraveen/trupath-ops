@@ -12,6 +12,7 @@ import { adjustMaterial, round3 } from "@/lib/materials";
 import { formatINR } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
 import { adjustStock } from "@/lib/stock";
+import { queueStockPush } from "@/lib/stock-push";
 
 function revalidateJobWork(id?: string) {
   for (const p of ["/jobwork", "/factory", "/factory/materials", "/stock", "/sales", "/payments", "/"]) revalidatePath(p);
@@ -156,10 +157,12 @@ export async function receiveJobWork(_prev: ActionState, formData: FormData): Pr
     const d = parsed.data;
     const rejected = d.rejectedQty ?? 0;
     if (d.acceptedQty + rejected <= 0) return { error: "Enter the accepted or rejected quantity" };
+    let pushId: string | null = null;
     const msg = await db.transaction(async (tx) => {
       const [o] = await tx.select().from(jobWorkOrders).where(eq(jobWorkOrders.id, d.id)).for("update");
       if (!o) throw new Error("Order not found");
       if (o.status === "cancelled" || o.status === "closed") throw new Error("This order is closed");
+      pushId = o.productId;
       await tx.insert(jobWorkReceipts).values({ orderId: d.id, receiptDate: d.receiptDate, acceptedQty: d.acceptedQty, rejectedQty: rejected, note: d.note ?? null, userId: user.id });
       const receivedQty = o.receivedQty + d.acceptedQty;
       const rejectedQty = o.rejectedQty + rejected;
@@ -174,6 +177,7 @@ export async function receiveJobWork(_prev: ActionState, formData: FormData): Pr
       await audit(tx, { userId: user.id, action: "receive", entityType: "jobwork", entityId: d.id, summary: `${o.number}: received ${d.acceptedQty}${rejected ? `, ${rejected} rejected` : ""}` });
       return "Receipt recorded";
     });
+    if (pushId) queueStockPush([pushId]);
     revalidateJobWork(d.id);
     return { ok: true, message: msg };
   } catch (err) {

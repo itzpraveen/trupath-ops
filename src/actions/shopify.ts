@@ -10,6 +10,7 @@ import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zOptional, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
 import { refreshStoreWebhooks, syncShopify, syncSingleOrder, testShopifyConnection } from "@/lib/shopify";
 import { clearStoreToken, getStore, getStoreByShop, isValidShop, storeAuth, upsertStore } from "@/lib/shopify-oauth";
+import { fulfillShopifyOrder, pushAllStockForStore } from "@/lib/shopify-writeback";
 
 function revalidateAll() {
   for (const p of ["/orders", "/products", "/stock", "/sales", "/settings/shopify", "/"]) revalidatePath(p);
@@ -105,6 +106,7 @@ const storeSchema = z.object({
   clientId: zOptional(120),
   clientSecret: zOptional(200),
   active: zBool,
+  pushInventory: zBool,
 });
 
 export async function saveShopifyStore(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -116,10 +118,40 @@ export async function saveShopifyStore(_prev: ActionState, formData: FormData): 
     if (!isValidShop(d.shop)) return { error: "Enter the store's myshopify.com domain, for example tswyfk-qm.myshopify.com", fieldErrors: { shop: ["Must end with .myshopify.com"] } };
     const dup = await getStoreByShop(d.shop);
     if (dup && dup.id !== d.id) return { error: "That store is already listed", fieldErrors: { shop: ["Already listed"] } };
-    const id = await upsertStore({ id: d.id, shop: d.shop, label: d.label, brandId: d.brandId, entityId: d.entityId, channel: d.channel ?? "Own website", clientId: d.clientId ?? null, clientSecret: d.clientSecret ?? null, active: d.id ? d.active : true });
+    const id = await upsertStore({ id: d.id, shop: d.shop, label: d.label, brandId: d.brandId, entityId: d.entityId, channel: d.channel ?? "Own website", clientId: d.clientId ?? null, clientSecret: d.clientSecret ?? null, active: d.id ? d.active : true, pushInventory: d.pushInventory });
     await audit(db, { userId: user.id, action: d.id ? "update" : "create", entityType: "shopify", entityId: d.shop, summary: `${d.id ? "Updated" : "Added"} store ${d.label}` });
     revalidateAll();
     return { ok: true, message: d.id ? "Store saved" : `${d.label} added. Now press Connect.`, id };
+  } catch (err) {
+    return { error: errorMessage(err) };
+  }
+}
+
+const fulfilSchema = z.object({ id: zRequired("Order", 40), courier: zOptional(80), trackingNo: zOptional(120), trackingUrl: zOptional(500), notifyCustomer: zBool });
+
+export async function fulfilOrderInShopify(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await requireEditor("dispatch");
+    const parsed = parseForm(fulfilSchema, formData);
+    if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
+    const d = parsed.data;
+    const r = await fulfillShopifyOrder(d.id, { company: d.courier, number: d.trackingNo, url: d.trackingUrl }, d.notifyCustomer);
+    await audit(db, { userId: user.id, action: "fulfil", entityType: "shopify_order", entityId: d.id, summary: r.message });
+    revalidateAll();
+    revalidatePath(`/orders/${d.id}`);
+    return { ok: true, message: r.message };
+  } catch (err) {
+    return { error: errorMessage(err) };
+  }
+}
+
+export async function pushAllStock(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    await requireEditor("settings");
+    const r = await pushAllStockForStore(String(formData.get("storeId") ?? ""));
+    revalidateAll();
+    const msg = `Pushed stock for ${r.pushed} products${r.skipped ? `, skipped ${r.skipped} (not tracked in Shopify)` : ""}`;
+    return r.errors.length ? { error: `${msg}. ${r.errors.join(" | ")}` } : { ok: true, message: msg };
   } catch (err) {
     return { error: errorMessage(err) };
   }

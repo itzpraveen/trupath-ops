@@ -62,10 +62,19 @@ export function StoreDialog({ store, brands, entities, channels, hasOwnSecret }:
               </Field>
             </FormRow>
             {store ? (
-              <label className="flex items-center gap-2 text-sm">
-                <input type="checkbox" name="active" defaultChecked={store.active} className="size-4 accent-primary" />
-                Active (synced on schedule)
-              </label>
+              <>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" name="active" defaultChecked={store.active} className="size-4 accent-primary" />
+                  Active (synced on schedule)
+                </label>
+                <label className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" name="pushInventory" defaultChecked={store.pushInventory} className="mt-0.5 size-4 accent-primary" />
+                  <span>
+                    Keep website stock in sync with this app
+                    <span className="block text-xs text-muted-foreground">Every stock change here is pushed to Shopify as the available quantity. Turn on only after counting stock, or the website will show everything sold out.</span>
+                  </span>
+                </label>
+              </>
             ) : null}
           </>
         );

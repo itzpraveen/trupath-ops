@@ -196,7 +196,7 @@ type ProductNode = {
   productType: string | null;
   status: string;
   featuredMedia: { preview: { image: { url: string } | null } | null } | null;
-  variants: { nodes: Array<{ id: string; title: string; sku: string | null; price: string; inventoryQuantity: number | null; image: { url: string } | null }> };
+  variants: { nodes: Array<{ id: string; title: string; sku: string | null; price: string; inventoryQuantity: number | null; image: { url: string } | null; inventoryItem: { id: string; tracked: boolean } | null }> };
 };
 
 async function* iterateProducts(auth: StoreAuth) {
@@ -209,7 +209,7 @@ async function* iterateProducts(auth: StoreAuth) {
           nodes {
             id title productType status
             featuredMedia { preview { image { url } } }
-            variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } } }
+            variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } inventoryItem { id tracked } } }
           }
         }
       }`,
@@ -224,7 +224,7 @@ async function* iterateProducts(auth: StoreAuth) {
 
 export async function fetchProductById(numericId: string, auth: StoreAuth): Promise<ProductNode | null> {
   const data: { product: ProductNode | null } = await shopifyGraphQL(
-    `query Product($id: ID!) { product(id: $id) { id title productType status featuredMedia { preview { image { url } } } variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } } } } }`,
+    `query Product($id: ID!) { product(id: $id) { id title productType status featuredMedia { preview { image { url } } } variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } inventoryItem { id tracked } } } } }`,
     { id: `gid://shopify/Product/${numericId}` },
     auth,
   );
@@ -252,6 +252,8 @@ export async function upsertProductFromShopify(node: ProductNode, auth: StoreAut
       imageUrl: v.image?.url ?? node.featuredMedia?.preview?.image?.url ?? null,
       priceP: toPaise(v.price),
       shopifyQty: v.inventoryQuantity ?? null,
+      shopifyInventoryItemId: gidToId(v.inventoryItem?.id) ?? null,
+      shopifyTracked: v.inventoryItem?.tracked ?? null,
       source: "shopify" as const,
       active: node.status === "ACTIVE",
     };
@@ -270,6 +272,8 @@ export async function upsertProductFromShopify(node: ProductNode, auth: StoreAut
           imageUrl: values.imageUrl,
           priceP: values.priceP,
           shopifyQty: values.shopifyQty,
+          shopifyInventoryItemId: values.shopifyInventoryItemId,
+          shopifyTracked: values.shopifyTracked,
           active: values.active,
         },
       });

@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import { desc } from "drizzle-orm";
-import { disconnectShopify, registerShopifyWebhooks, testShopify } from "@/actions/shopify";
+import { disconnectShopify, pushAllStock, registerShopifyWebhooks, testShopify } from "@/actions/shopify";
 import { db } from "@/db";
 import { syncRuns } from "@/db/schema";
 import { formatDate, formatDateTime } from "@/lib/dates";
 import { getBrands, getCategories, getEntities } from "@/lib/queries/common";
-import { listStores, shopifyApiVersion, storeCredentials, storeToken } from "@/lib/shopify-oauth";
+import { listStores, missingScopes, shopifyApiVersion, storeCredentials, storeToken } from "@/lib/shopify-oauth";
 import { Button } from "@/components/ui/button";
 import { ConfirmAction } from "@/components/app/confirm-action";
 import { InlineAction } from "@/components/app/inline-action";
@@ -41,6 +41,7 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
             const connected = !!storeToken(store) && store.active;
             const creds = storeCredentials(store);
             const hasCreds = !!(creds.clientId && creds.clientSecret);
+            const missing = connected ? missingScopes(store.scope) : [];
             const brand = brands.find((b) => b.id === store.brandId)?.name ?? store.brandId;
             const entity = entities.find((e) => e.id === store.entityId)?.name ?? store.entityId;
             return (
@@ -73,6 +74,25 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
                   ) : null}
                   <dt className="text-muted-foreground">Webhooks</dt>
                   <dd>{store.webhooks.length ? store.webhooks.map((t) => t.toLowerCase().replace("_", "/")).join(", ") : connected ? "none registered yet" : "—"}</dd>
+                  {connected ? (
+                    <>
+                      <dt className="text-muted-foreground">Permissions</dt>
+                      <dd>
+                        {missing.length ? (
+                          <span className="text-warning">
+                            missing {missing.join(", ")} —{" "}
+                            <a href={`/api/shopify/install?store=${store.id}`} className="font-medium text-primary hover:underline">
+                              Update permissions
+                            </a>
+                          </span>
+                        ) : (
+                          "all granted"
+                        )}
+                      </dd>
+                      <dt className="text-muted-foreground">Website stock</dt>
+                      <dd>{store.pushInventory ? "kept in sync from this app" : "not pushed (turn on in Edit store after counting stock)"}</dd>
+                    </>
+                  ) : null}
                 </dl>
                 <div className="mt-4 flex flex-wrap gap-2">
                   <StoreDialog store={store} hasOwnSecret={!!store.clientSecretEnc} {...opts} />
@@ -86,6 +106,9 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
                       <InlineAction action={registerShopifyWebhooks} hidden={{ storeId: store.id }} variant="outline" size="sm">
                         Register webhooks
                       </InlineAction>
+                      <ConfirmAction trigger={<Button variant="outline" size="sm" />} title={`Push all stock to ${store.label}?`} description="Sets the website's available quantity for every product of this brand to the stock shown in this app. Products at 0 here will show as sold out on the website." action={pushAllStock} hidden={{ storeId: store.id }} confirmLabel="Push stock">
+                        Push all stock
+                      </ConfirmAction>
                       <ConfirmAction trigger={<Button variant="ghost" size="sm" className="text-destructive" />} title={`Disconnect ${store.label}?`} description="Syncing stops until you connect again. Orders already synced stay in the books." action={disconnectShopify} hidden={{ storeId: store.id }} confirmLabel="Disconnect" destructive>
                         Disconnect
                       </ConfirmAction>
@@ -145,7 +168,7 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
             At dev.shopify.com create an app. In its version form set <span className="font-medium">App URL</span> to <code className="rounded bg-muted px-1">{appUrl}</code>, untick <span className="font-medium">Embed app in Shopify admin</span>, and choose webhooks API version <span className="font-medium">{shopifyApiVersion()}</span>.
           </li>
           <li>
-            Under <span className="font-medium">API access → Scopes</span> enter <code className="rounded bg-muted px-1">read_orders, read_all_orders, read_products, read_inventory, read_customers</code> and add <code className="rounded bg-muted px-1">{appUrl}/api/shopify/callback</code> under allowed redirection URLs. Press <span className="font-medium">Release</span>.
+            Under <span className="font-medium">API access → Scopes</span> enter <code className="rounded bg-muted px-1">read_orders, read_all_orders, read_products, read_inventory, write_inventory, read_locations, read_customers, read_merchant_managed_fulfillment_orders, write_merchant_managed_fulfillment_orders</code> and add <code className="rounded bg-muted px-1">{appUrl}/api/shopify/callback</code> under allowed redirection URLs. Press <span className="font-medium">Release</span>.
           </li>
           <li>Request <span className="font-medium">Protected customer data access</span> (customer data plus name, address, email, phone) and set <span className="font-medium">Distribution</span> to custom distribution for that store&apos;s myshopify.com domain.</li>
           <li>Copy the app&apos;s client ID and client secret into the store card here (Add store or Edit store).</li>

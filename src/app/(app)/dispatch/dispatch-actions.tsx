@@ -8,7 +8,7 @@ import { ConfirmAction } from "@/components/app/confirm-action";
 import { Field, FormRow } from "@/components/app/field";
 import { FormDialog } from "@/components/app/form-dialog";
 
-export function DispatchActions({ dispatch }: { dispatch: Dispatch }) {
+export function DispatchActions({ dispatch, canFulfil }: { dispatch: Dispatch; canFulfil?: boolean }) {
   const s = dispatch.status;
   return (
     <div className="flex flex-wrap gap-2">
@@ -41,6 +41,21 @@ export function DispatchActions({ dispatch }: { dispatch: Dispatch }) {
                     <Input id="trackingUrl" name="trackingUrl" inputMode="url" defaultValue={dispatch.trackingUrl ?? ""} />
                   </Field>
                 </FormRow>
+                {dispatch.shopifyOrderId ? (
+                  <div className="space-y-2 rounded-lg bg-muted/60 p-3">
+                    <label className="flex items-start gap-2 text-sm">
+                      <input type="checkbox" name="fulfilShopify" defaultChecked={canFulfil !== false} className="mt-0.5 size-4 accent-primary" />
+                      <span>
+                        Also mark the order fulfilled in Shopify
+                        <span className="block text-xs text-muted-foreground">{canFulfil === false ? "The store has not granted the fulfilment permission yet (Settings → Shopify → Update permissions)." : "Adds the courier and tracking number to the Shopify order."}</span>
+                      </span>
+                    </label>
+                    <label className="flex items-center gap-2 text-sm">
+                      <input type="checkbox" name="notifyCustomer" defaultChecked className="size-4 accent-primary" />
+                      Send the customer Shopify&apos;s shipping notification
+                    </label>
+                  </div>
+                ) : null}
               </>
             );
           }}

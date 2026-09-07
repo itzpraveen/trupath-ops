@@ -16,6 +16,8 @@ import { PageHeader, Section } from "@/components/app/page-header";
 import { DISPATCH_TONE, StatusBadge } from "@/components/app/status-badge";
 import { Table, TableBody, TableCard, TableCell, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
 import { SyncButton } from "../sync-button";
+import { FulfilDialog } from "../fulfil-dialog";
+import { FULFIL_SCOPE, getStoreByShop, hasScope } from "@/lib/shopify-oauth";
 
 export const metadata: Metadata = { title: "Order" };
 const pretty = (s: string) => s.toLowerCase().replace(/_/g, " ");
@@ -36,6 +38,9 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
   const editable = canEdit(user.role, "orders") && canEdit(user.role, "dispatch");
   const addr = o.shippingAddress ?? {};
   const handle = o.shop?.replace(".myshopify.com", "");
+  const store = o.shop ? await getStoreByShop(o.shop) : null;
+  const canFulfil = !!store && hasScope(store.scope, FULFIL_SCOPE);
+  const openForFulfilment = !o.cancelledAt && !["FULFILLED", "RESTOCKED"].includes(o.fulfillmentStatus);
   const adminUrl = handle ? `https://admin.shopify.com/store/${handle}/orders/${o.id}` : null;
 
   return (
@@ -53,6 +58,7 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
         backLabel="Website orders"
       >
         {editable ? <SyncButton orderId={o.id} label="Refresh" variant="ghost" /> : null}
+        {editable && openForFulfilment ? <FulfilDialog orderId={o.id} orderName={o.name} canFulfil={canFulfil} /> : null}
         {adminUrl ? (
           <a href={adminUrl} target="_blank" rel="noreferrer" className={buttonVariants({ variant: "outline", size: "sm" })}>
             <ExternalLink /> Open in Shopify

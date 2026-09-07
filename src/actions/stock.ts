@@ -9,6 +9,7 @@ import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zEnum, zInt, zOptional, zUuid, type ActionState } from "@/lib/forms";
 import { adjustStock } from "@/lib/stock";
+import { queueStockPush } from "@/lib/stock-push";
 
 const KINDS = ["purchase_in", "return_in", "adjustment", "count"] as const;
 const schema = z.object({
@@ -39,6 +40,7 @@ export async function stockMovement(_prev: ActionState, formData: FormData): Pro
       await audit(tx, { userId: user.id, action: d.kind, entityType: "product", entityId: d.productId, summary: `${p.name} ${p.variant}: ${d.kind} ${r.delta > 0 ? "+" : ""}${r.delta} (${r.before} → ${r.after})`.trim() });
       return { p, r };
     });
+    queueStockPush([d.productId]);
     revalidateStock();
     revalidatePath(`/stock/${d.productId}`);
     return { ok: true, message: `${result.p.name}${result.p.variant ? ` ${result.p.variant}` : ""} now ${result.r.after} in stock` };

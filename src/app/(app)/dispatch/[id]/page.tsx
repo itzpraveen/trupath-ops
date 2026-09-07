@@ -4,7 +4,8 @@ import { notFound } from "next/navigation";
 import { and, desc, eq } from "drizzle-orm";
 import { Pencil, Printer } from "lucide-react";
 import { db } from "@/db";
-import { dispatchItems, dispatches, products, uploads } from "@/db/schema";
+import { dispatchItems, dispatches, products, shopifyOrders, uploads } from "@/db/schema";
+import { FULFIL_SCOPE, getStoreByShop, hasScope } from "@/lib/shopify-oauth";
 import { requireUser } from "@/lib/auth";
 import { formatDate, formatDateTime, todayIST } from "@/lib/dates";
 import { canEdit } from "@/lib/permissions";
@@ -34,6 +35,12 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
   ]);
   const editable = canEdit(user.role, "dispatch");
   const editing = editable && sp.edit === "1";
+  let canFulfil: boolean | undefined;
+  if (d.shopifyOrderId) {
+    const [o] = await db.select({ shop: shopifyOrders.shop }).from(shopifyOrders).where(eq(shopifyOrders.id, d.shopifyOrderId)).limit(1);
+    const store = o?.shop ? await getStoreByShop(o.shop) : null;
+    canFulfil = !!store && hasScope(store.scope, FULFIL_SCOPE);
+  }
   const brandName = brands.find((b) => b.id === d.brandId)?.name ?? d.brandId;
   const pcs = items.reduce((s, r) => s + r.it.qty, 0);
 
@@ -71,7 +78,7 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
 
       {editable ? (
         <div className="mb-6">
-          <DispatchActions dispatch={d} />
+          <DispatchActions dispatch={d} canFulfil={canFulfil} />
         </div>
       ) : null}
 

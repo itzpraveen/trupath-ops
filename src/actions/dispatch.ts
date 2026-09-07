@@ -13,6 +13,8 @@ import { errorMessage, parseForm, zBool, zDate, zEnum, zOptional, zOptionalMoney
 import { formatINR } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
 import { adjustStock } from "@/lib/stock";
+import { queueStockPush } from "@/lib/stock-push";
+import { fulfillShopifyOrder } from "@/lib/shopify-writeback";
 
 function revalidateDispatch(id?: string) {
   for (const p of ["/dispatch", "/stock", "/sales", "/orders", "/"]) revalidatePath(p);
@@ -150,6 +152,8 @@ const statusSchema = z.object({
   trackingNo: zOptional(120),
   trackingUrl: zOptional(500),
   reason: zOptional(500),
+  fulfilShopify: zBool,
+  notifyCustomer: zBool,
 });
 
 const ALLOWED: Record<DispatchStatus, DispatchStatus[]> = {
@@ -167,7 +171,7 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
     const parsed = parseForm(statusSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
-    const label = await db.transaction(async (tx) => {
+    const outcome = await db.transaction(async (tx) => {
       const [dsp] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id)).for("update");
       if (!dsp) throw new Error("Dispatch not found");
       if (!ALLOWED[dsp.status].includes(d.status)) throw new Error(`Cannot move from ${dsp.status} to ${d.status}`);
@@ -177,17 +181,28 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
       if (d.courier !== undefined) set.courier = d.courier;
       if (d.trackingNo !== undefined) set.trackingNo = d.trackingNo;
       if (d.trackingUrl !== undefined) set.trackingUrl = d.trackingUrl;
+      // A dispatch created from a website order shares its stock movement with the order sync: whichever happens first deducts.
+      const [order] = dsp.shopifyOrderId ? await tx.select().from(shopifyOrders).where(eq(shopifyOrders.id, dsp.shopifyOrderId)).for("update") : [];
+      let touched = false;
       if (d.status === "shipped") {
         set.shippedAt = now;
         if (!dsp.stockDeducted) {
-          for (const it of items) await adjustStock(tx, { productId: it.productId, kind: "dispatch_out", qty: -it.qty, refType: "dispatch", refId: dsp.number, note: `Dispatched ${dsp.number} to ${dsp.customerName}`, userId: user.id });
+          if (order?.stockDeducted && !order.stockRestored) {
+            // the order sync already took the stock out
+          } else {
+            for (const it of items) await adjustStock(tx, { productId: it.productId, kind: "dispatch_out", qty: -it.qty, refType: "dispatch", refId: dsp.number, note: `Dispatched ${dsp.number} to ${dsp.customerName}`, userId: user.id });
+            touched = true;
+            if (order) await tx.update(shopifyOrders).set({ stockDeducted: true, stockRestored: false }).where(eq(shopifyOrders.id, order.id));
+          }
           set.stockDeducted = true;
         }
       }
       if (d.status === "delivered") set.deliveredAt = now;
       if ((d.status === "returned" || d.status === "cancelled") && dsp.stockDeducted) {
         for (const it of items) await adjustStock(tx, { productId: it.productId, kind: "return_in", qty: it.qty, refType: "dispatch", refId: dsp.number, note: `${d.status === "returned" ? "Returned" : "Cancelled"} ${dsp.number}${d.reason ? `: ${d.reason}` : ""}`, userId: user.id });
+        touched = true;
         set.stockDeducted = false;
+        if (order) await tx.update(shopifyOrders).set({ stockRestored: true }).where(eq(shopifyOrders.id, order.id));
       }
       if (d.reason) set.note = dsp.note ? `${dsp.note}\n${d.status}: ${d.reason}` : `${d.status}: ${d.reason}`;
       await tx.update(dispatches).set(set).where(eq(dispatches.id, d.id));
@@ -198,10 +213,21 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
           .where(and(eq(businessRecords.sourceRef, `dispatch:${d.id}`)));
       }
       await audit(tx, { userId: user.id, action: d.status, entityType: "dispatch", entityId: d.id, summary: `${dsp.number} marked ${d.status}${d.trackingNo ? ` (${d.courier ?? ""} ${d.trackingNo})` : ""}` });
-      return dsp.number;
+      return { number: dsp.number, shopifyOrderId: dsp.shopifyOrderId, productIds: touched && !dsp.shopifyOrderId ? items.map((i) => i.productId) : [], courier: set.courier ?? dsp.courier, trackingNo: set.trackingNo ?? dsp.trackingNo, trackingUrl: set.trackingUrl ?? dsp.trackingUrl };
     });
+    queueStockPush(outcome.productIds);
     revalidateDispatch(d.id);
-    return { ok: true, message: `${label} marked ${d.status}` };
+    let message = `${outcome.number} marked ${d.status}`;
+    if (d.status === "shipped" && d.fulfilShopify && outcome.shopifyOrderId) {
+      try {
+        const r = await fulfillShopifyOrder(outcome.shopifyOrderId, { company: outcome.courier, number: outcome.trackingNo, url: outcome.trackingUrl }, d.notifyCustomer);
+        message += `. ${r.message}`;
+        revalidatePath(`/orders/${outcome.shopifyOrderId}`);
+      } catch (err) {
+        return { ok: true, message: `${message}. Shopify was not updated: ${errorMessage(err)}` };
+      }
+    }
+    return { ok: true, message };
   } catch (err) {
     return { error: errorMessage(err) };
   }
