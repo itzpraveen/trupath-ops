@@ -1,0 +1,95 @@
+"use server";
+
+import { eq } from "drizzle-orm";
+import { revalidatePath } from "next/cache";
+import { z } from "zod";
+import { db } from "@/db";
+import { bankAccounts, payments } from "@/db/schema";
+import { audit } from "@/lib/audit";
+import { requireEditor } from "@/lib/auth";
+import { errorMessage, parseForm, zBool, zDate, zEnum, zMoney, zOptional, zOptionalMoney, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
+import { formatINR } from "@/lib/money";
+import { nextNumber } from "@/lib/numbering";
+
+function revalidateMoney() {
+  for (const p of ["/payments", "/sales", "/contacts", "/reports", "/"]) revalidatePath(p);
+}
+
+const paymentSchema = z.object({
+  entityId: zEnum(["brand", "factory"], "books"),
+  direction: zEnum(["in", "out"], "direction"),
+  workDate: zDate,
+  amountP: zMoney("Amount"),
+  contactId: zOptionalUuid,
+  bankAccountId: zOptionalUuid,
+  method: zEnum(["cash", "upi", "bank", "card", "cod", "gateway", "other"], "method"),
+  reference: zOptional(100),
+  recordId: zOptionalUuid,
+  note: zOptional(500),
+});
+
+export async function createPayment(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await requireEditor("payments");
+    const parsed = parseForm(paymentSchema, formData);
+    if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
+    const d = parsed.data;
+    const id = await db.transaction(async (tx) => {
+      const number = await nextNumber(tx, d.direction === "in" ? "receipt" : "payment", d.workDate);
+      const [row] = await tx
+        .insert(payments)
+        .values({ number, entityId: d.entityId, direction: d.direction, workDate: d.workDate, amountP: d.amountP, contactId: d.contactId ?? null, bankAccountId: d.bankAccountId ?? null, method: d.method, reference: d.reference ?? "", recordId: d.recordId ?? null, note: d.note ?? null, userId: user.id })
+        .returning({ id: payments.id });
+      await audit(tx, { userId: user.id, action: "create", entityType: "payment", entityId: row.id, summary: `${number}: ${d.direction === "in" ? "received" : "paid"} ${formatINR(d.amountP)}` });
+      return row.id;
+    });
+    revalidateMoney();
+    return { ok: true, message: d.direction === "in" ? "Receipt recorded" : "Payment recorded", id };
+  } catch (err) {
+    return { error: errorMessage(err) };
+  }
+}
+
+const voidSchema = z.object({ id: zRequired("Payment"), reason: zRequired("Reason", 300) });
+
+export async function voidPayment(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await requireEditor("payments");
+    const parsed = parseForm(voidSchema, formData);
+    if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
+    const [p] = await db.select().from(payments).where(eq(payments.id, parsed.data.id)).limit(1);
+    if (!p) return { error: "Payment not found" };
+    if (p.voidedAt) return { error: "Already voided" };
+    await db.update(payments).set({ voidedAt: new Date(), voidReason: parsed.data.reason }).where(eq(payments.id, p.id));
+    await audit(db, { userId: user.id, action: "void", entityType: "payment", entityId: p.id, summary: `Voided ${p.number}: ${parsed.data.reason}` });
+    revalidateMoney();
+    return { ok: true, message: "Payment voided" };
+  } catch (err) {
+    return { error: errorMessage(err) };
+  }
+}
+
+const accountSchema = z.object({
+  id: zOptionalUuid,
+  entityId: zEnum(["brand", "factory"], "books"),
+  name: zRequired("Name", 80),
+  type: zEnum(["cash", "bank", "upi", "wallet"], "type"),
+  openingP: zOptionalMoney,
+  active: zBool,
+});
+
+export async function saveBankAccount(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await requireEditor("payments");
+    const parsed = parseForm(accountSchema, formData);
+    if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
+    const d = parsed.data;
+    if (d.id) await db.update(bankAccounts).set({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP, active: d.active }).where(eq(bankAccounts.id, d.id));
+    else await db.insert(bankAccounts).values({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP });
+    await audit(db, { userId: user.id, action: d.id ? "update" : "create", entityType: "bank_account", entityId: d.id ?? null, summary: `${d.id ? "Updated" : "Added"} account ${d.name}` });
+    revalidateMoney();
+    return { ok: true, message: "Account saved" };
+  } catch (err) {
+    return { error: errorMessage(err) };
+  }
+}

@@ -39,3 +39,10 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local env & db
+.env
+.env.*.local
+
+# e2e screenshots
+e2e-shots/
