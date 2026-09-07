@@ -223,8 +223,8 @@ export async function createDispatchFromOrder(orderId: string) {
       .insert(dispatches)
       .values({
         number,
-        brandId: "babygambling",
-        entityId: "brand",
+        brandId: order.brandId ?? "babygambling",
+        entityId: order.entityId ?? "brand",
         orderRef: order.name,
         shopifyOrderId: order.id,
         customerName: order.customerName,

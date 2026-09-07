@@ -4,8 +4,8 @@ import { after } from "next/server";
 import { db } from "@/db";
 import { audit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/auth";
-import { registerWebhooks, shopifyApiVersion, syncShopify } from "@/lib/shopify";
-import { ensureStockBaseline, exchangeCodeForToken, isValidShop, saveConnection, verifyOAuthHmac } from "@/lib/shopify-oauth";
+import { registerWebhooks, syncShopify } from "@/lib/shopify";
+import { exchangeCodeForToken, getStore, getStoreByShop, saveStoreToken, shopifyApiVersion, storeCredentials, verifyOAuthHmac } from "@/lib/shopify-oauth";
 
 export async function GET(request: NextRequest) {
   const base = (process.env.APP_URL?.trim() || request.nextUrl.origin).replace(/\/$/, "");
@@ -17,15 +17,18 @@ export async function GET(request: NextRequest) {
   const shop = (params.get("shop") ?? "").toLowerCase();
   const code = params.get("code") ?? "";
   const state = params.get("state") ?? "";
-  const cookie = request.cookies.get("shopify_oauth_state")?.value ?? "";
-  const [expectedState, expectedShop] = cookie.split(":");
-  if (!code || !state || state !== expectedState || shop !== expectedShop) return back("The connection attempt expired or did not match. Start again from this page.");
-  if (!isValidShop(shop)) return back("Shopify returned an unexpected store domain.");
-  if (!verifyOAuthHmac(params)) return back("Shopify's signature did not verify. Check SHOPIFY_CLIENT_SECRET.");
+  const [expectedState, storeId] = (request.cookies.get("shopify_oauth_state")?.value ?? "").split(":");
+  if (!code || !state || state !== expectedState || !storeId) return back("The connection attempt expired or did not match. Start again from this page.");
+  const store = await getStore(storeId);
+  const byShop = await getStoreByShop(shop);
+  if (!store || !byShop || byShop.id !== store.id) return back("Shopify returned a different store than the one you started connecting.");
+  const { clientId, clientSecret } = storeCredentials(store);
+  if (!clientId || !clientSecret) return back("The store's app credentials are missing.");
+  if (!verifyOAuthHmac(params, clientSecret)) return back("Shopify's signature did not verify. Check the client secret for this store.");
 
   try {
-    const { token, scope } = await exchangeCodeForToken(shop, code);
-    const auth = { shop, token, version: shopifyApiVersion(), source: "oauth" as const };
+    const { token, scope } = await exchangeCodeForToken(shop, code, clientId, clientSecret);
+    const auth = { storeId: store.id, shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt };
     let webhooks: string[] = [];
     let webhookNote = "";
     try {
@@ -33,19 +36,17 @@ export async function GET(request: NextRequest) {
     } catch (err) {
       webhookNote = err instanceof Error ? err.message : String(err);
     }
-    const installedAt = new Date();
-    await saveConnection({ shop, token, scope, installedAt: installedAt.toISOString(), webhooks });
-    await ensureStockBaseline(installedAt);
-    await audit(db, { userId: user.id, action: "connect", entityType: "shopify", entityId: shop, summary: `Connected Shopify store ${shop} (${scope})${webhookNote ? ` · webhooks: ${webhookNote}` : ""}` });
+    await saveStoreToken(store.id, { token, scope, webhooks });
+    await audit(db, { userId: user.id, action: "connect", entityType: "shopify", entityId: shop, summary: `Connected ${store.label} (${shop}; ${scope})${webhookNote ? ` · webhooks: ${webhookNote}` : ""}` });
     after(async () => {
       try {
-        await syncShopify({ trigger: "install", full: true, sinceDays: 365 });
+        await syncShopify({ trigger: "install", full: true, sinceDays: 365, storeId: store.id });
       } catch (err) {
         console.error("[shopify install] first sync failed:", err instanceof Error ? err.message : err);
       }
     });
     for (const p of ["/settings/shopify", "/orders", "/products", "/stock", "/sales", "/"]) revalidatePath(p);
-    const res = NextResponse.redirect(`${base}/settings/shopify?connected=1${webhookNote ? `&warn=${encodeURIComponent(webhookNote)}` : ""}`);
+    const res = NextResponse.redirect(`${base}/settings/shopify?connected=${encodeURIComponent(store.label)}${webhookNote ? `&warn=${encodeURIComponent(webhookNote)}` : ""}`);
     res.cookies.delete("shopify_oauth_state");
     return res;
   } catch (err) {

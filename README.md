@@ -56,7 +56,7 @@ Custom domain: add e.g. `ops.babygambling.in` under the service's Settings → C
 
 ## Connect Shopify
 
-Settings → Shopify inside the app lists the exact steps. Two ways work:
+More than one store is supported (Baby Gambling and Firstbon each have a card under Settings → Shopify, with their own brand, books and app credentials). Settings → Shopify inside the app lists the exact steps. Two ways work:
 
 - **Dev Dashboard app (recommended).** Create an app at dev.shopify.com, set the App URL to your app address, untick "Embed app in Shopify admin", add the scopes `read_orders, read_all_orders, read_products, read_inventory, read_customers`, tick "Use legacy install flow", add `https://<app>/api/shopify/callback` as the allowed redirection URL, release the version, request protected customer data access (name, address, email, phone) and set custom distribution to your store. Copy the client id and secret into `SHOPIFY_CLIENT_ID` / `SHOPIFY_CLIENT_SECRET`, set `SHOPIFY_STORE_DOMAIN`, then press **Connect to Shopify** in the app. The token is stored encrypted and the webhooks are registered for you.
 - **Legacy custom app token.** If your store still offers Settings → Apps → Develop apps, set `SHOPIFY_STORE_DOMAIN` and `SHOPIFY_ADMIN_TOKEN` instead, and add webhooks by hand with `SHOPIFY_WEBHOOK_SECRET`.

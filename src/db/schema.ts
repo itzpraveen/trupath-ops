@@ -523,17 +523,46 @@ export const shopifyOrders = pgTable(
     cancelReason: text(),
     closedAt: timestamp({ withTimezone: true }),
     lineItems: jsonb().$type<ShopifyLine[]>().notNull().default(sql`'[]'::jsonb`),
+    shop: text(),
+    brandId: text(),
+    entityId: text(),
     stockDeducted: boolean().notNull().default(false),
     stockRestored: boolean().notNull().default(false),
     note: text(),
     syncedAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
-  (t) => [index("shopify_orders_created_idx").on(t.createdAtShop), index("shopify_orders_status_idx").on(t.financialStatus, t.fulfillmentStatus)],
+  (t) => [index("shopify_orders_created_idx").on(t.createdAtShop), index("shopify_orders_status_idx").on(t.financialStatus, t.fulfillmentStatus), index("shopify_orders_shop_idx").on(t.shop)],
 );
+
+/** One row per connected Shopify store. Secrets are encrypted with the app key. */
+export const shopifyStores = pgTable("shopify_stores", {
+  id: id(),
+  shop: text().notNull().unique(), // e.g. jedtmv-0e.myshopify.com
+  label: text().notNull(),
+  brandId: text()
+    .notNull()
+    .references(() => brands.id),
+  entityId: text()
+    .notNull()
+    .references(() => entities.id),
+  channel: text().notNull().default("Own website"),
+  clientId: text(),
+  clientSecretEnc: text(),
+  tokenEnc: text(),
+  scope: text(),
+  installedAt: timestamp({ withTimezone: true }),
+  baselineAt: timestamp({ withTimezone: true }),
+  webhooks: jsonb().$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  active: boolean().notNull().default(true),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+export type ShopifyStore = typeof shopifyStores.$inferSelect;
 
 export const syncRuns = pgTable("sync_runs", {
   id: id(),
   kind: text().notNull().default("shopify"),
+  shop: text(),
   trigger: text().notNull().default("manual"),
   status: text().$type<"running" | "ok" | "error">().notNull().default("running"),
   startedAt: createdAt(),

@@ -5,6 +5,8 @@ import postgres from "postgres";
 import * as schema from "./schema";
 import { hashPassword } from "../lib/password";
 import catalog from "./seed-data/catalog.json";
+import catalogFirstbon from "./seed-data/catalog-firstbon.json";
+import { inArray, isNull } from "drizzle-orm";
 
 type CatalogItem = {
   productId: string;
@@ -80,6 +82,7 @@ async function main() {
     .values([
       { id: "brand", name: "Trupaths Ventures", legalName: "Trupaths Ventures LLP", stateCode: "32", sortOrder: 0 },
       { id: "factory", name: "Trupaths Factory", legalName: "Trupaths Ventures LLP (Factory)", stateCode: "32", sortOrder: 1 },
+      { id: "firstbon", name: "Firstbon", legalName: "Firstbon", stateCode: "32", sortOrder: 2 },
     ])
     .onConflictDoNothing();
 
@@ -125,13 +128,41 @@ async function main() {
     if (!existing.length) await db.insert(schema.bankAccounts).values(b);
   }
 
-  // Baby Gambling catalogue (public Shopify listing). Later syncs match on shopify_variant_id.
-  const items = catalog as CatalogItem[];
+  // Store rows: Baby Gambling and Firstbon. Credentials/tokens are added from Settings → Shopify.
+  await db
+    .insert(schema.shopifyStores)
+    .values([
+      { shop: "jedtmv-0e.myshopify.com", label: "Baby Gambling website", brandId: "babygambling", entityId: "brand" },
+      { shop: "tswyfk-qm.myshopify.com", label: "Firstbon website", brandId: "firstbon", entityId: "firstbon" },
+    ])
+    .onConflictDoNothing();
+
+  // Move a connection made by the single-store version into the store row (ciphertext is compatible).
+  const [legacy] = await db.select().from(schema.settings).where(eq(schema.settings.key, "shopify.connection")).limit(1);
+  if (legacy) {
+    const v = legacy.value as { shop: string; tokenEnc: string; scope: string; installedAt: string; webhooks?: string[] };
+    const [baselineRow] = await db.select().from(schema.settings).where(eq(schema.settings.key, "shopify.stockBaselineAt")).limit(1);
+    const baseline = baselineRow && typeof baselineRow.value === "string" ? new Date(baselineRow.value) : new Date(v.installedAt);
+    await db
+      .update(schema.shopifyStores)
+      .set({ tokenEnc: v.tokenEnc, scope: v.scope, installedAt: new Date(v.installedAt), baselineAt: baseline, webhooks: v.webhooks ?? [], clientId: process.env.SHOPIFY_CLIENT_ID?.trim() || null })
+      .where(and(eq(schema.shopifyStores.shop, v.shop), isNull(schema.shopifyStores.tokenEnc)));
+    await db.delete(schema.settings).where(inArray(schema.settings.key, ["shopify.connection", "shopify.stockBaselineAt", "shopify.lastSyncAt"]));
+    console.log(`Moved the existing ${v.shop} connection into the stores table.`);
+  }
+  // Orders synced before stores existed belong to the Baby Gambling store.
+  await db
+    .update(schema.shopifyOrders)
+    .set({ shop: "jedtmv-0e.myshopify.com", brandId: "babygambling", entityId: "brand" })
+    .where(isNull(schema.shopifyOrders.shop));
+
+  // Catalogues from the public Shopify listings. Later syncs match on shopify_variant_id.
+  const items = [...(catalog as CatalogItem[]).map((c) => ({ ...c, brandId: "babygambling" })), ...(catalogFirstbon as CatalogItem[]).map((c) => ({ ...c, brandId: "firstbon" }))];
   const chunk = 100;
   let inserted = 0;
   for (let i = 0; i < items.length; i += chunk) {
     const rows = items.slice(i, i + chunk).map((c) => ({
-      brandId: "babygambling",
+      brandId: c.brandId,
       name: c.title,
       variant: c.variant,
       sku: c.sku,

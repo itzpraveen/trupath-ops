@@ -1,5 +1,5 @@
 /** Client-safe constants and types shared by forms and server code. */
-export const ENTITY_LABEL: Record<string, string> = { brand: "Trupaths Ventures", factory: "Factory" };
+export const ENTITY_LABEL: Record<string, string> = { brand: "Trupaths Ventures", factory: "Factory", firstbon: "Firstbon" };
 export const BRAND_LABEL: Record<string, string> = { babygambling: "Baby Gambling", firstbon: "Firstbon" };
 export const PAYMENT_METHODS = [
   ["cash", "Cash"],

@@ -55,7 +55,7 @@ export default async function DashboardPage(props: PageProps<"/">) {
     : [null, null, null, null];
   const [lows, dispatch] = showStock ? await Promise.all([lowStock(6), dispatchCounts()]) : [null, null];
   const shopifyOn = await isShopifyConfigured();
-  const orders = showOrders && shopifyOn ? await ordersSummary(new Date(`${today}T00:00:00+05:30`), mFrom, mTo) : null;
+  const orders = showOrders && shopifyOn ? await ordersSummary(new Date(`${today}T00:00:00+05:30`), mFrom, mTo, entity) : null;
   const lastSync = showOrders ? await getLastSync() : null;
 
   const pct = (cur: number, prev: number) => (prev > 0 ? Math.round(((cur - prev) / prev) * 100) : null);

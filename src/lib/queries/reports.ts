@@ -34,13 +34,10 @@ export async function gstSummary(entity: string, from: string, to: string) {
     .select({ gst: sql<number>`coalesce(sum(${businessRecords.gstP}),0)::float8`, taxable: sql<number>`coalesce(sum(${businessRecords.taxableP}),0)::float8`, bills: sql<number>`count(*) filter (where ${businessRecords.gstP} > 0)::int` })
     .from(businessRecords)
     .where(and(isNull(businessRecords.voidedAt), sql`${businessRecords.kind} in ('expense','purchase')`, gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entity === "all" ? undefined : eq(businessRecords.entityId, entity)));
-  const [web] =
-    entity === "factory"
-      ? [{ tax: 0, orders: 0, total: 0 }]
-      : await db
-          .select({ tax: sql<number>`coalesce(sum(${shopifyOrders.taxP}),0)::float8`, orders: sql<number>`count(*)::int`, total: sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` })
-          .from(shopifyOrders)
-          .where(and(isNull(shopifyOrders.cancelledAt), sql`(${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${from}::date and ${to}::date`));
+  const [web] = await db
+    .select({ tax: sql<number>`coalesce(sum(${shopifyOrders.taxP}),0)::float8`, orders: sql<number>`count(*)::int`, total: sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` })
+    .from(shopifyOrders)
+    .where(and(isNull(shopifyOrders.cancelledAt), sql`(${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${from}::date and ${to}::date`, entity === "all" ? undefined : eq(shopifyOrders.entityId, entity)));
   return { inputGst: Number(input?.gst ?? 0), inputTaxable: Number(input?.taxable ?? 0), inputBills: Number(input?.bills ?? 0), websiteTax: Number(web?.tax ?? 0), websiteOrders: Number(web?.orders ?? 0), websiteTotal: Number(web?.total ?? 0) };
 }
 
@@ -53,12 +50,13 @@ export async function stockValuation() {
   return { fgUnits: Number(fg?.units ?? 0), fgValue: Number(fg?.value ?? 0), fgRetail: Number(fg?.retail ?? 0), rmValue: Number(rm?.value ?? 0), rmItems: Number(rm?.items ?? 0) };
 }
 
-export async function topWebsiteProducts(from: string, to: string, limit = 10) {
+export async function topWebsiteProducts(from: string, to: string, limit = 10, entity = "all") {
   const res = await db.execute(sql`
     select li->>'title' as title, sum((li->>'quantity')::int)::int as qty, sum(((li->>'quantity')::int) * (li->>'priceP')::bigint)::float8 as value
     from ${shopifyOrders}, jsonb_array_elements(${shopifyOrders.lineItems}) li
     where ${shopifyOrders.cancelledAt} is null
       and (${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${from}::date and ${to}::date
+      and (${entity} = 'all' or ${shopifyOrders.entityId} = ${entity})
     group by 1 order by 2 desc limit ${limit}
   `);
   return (res as unknown as { title: string; qty: number; value: number }[]).map((r) => ({ title: String(r.title), qty: Number(r.qty), value: Number(r.value) }));

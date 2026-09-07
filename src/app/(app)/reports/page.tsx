@@ -38,7 +38,7 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
     gstSummary(entity, from, to),
     stockValuation(),
     productionInRange(from, to),
-    shopifyOn && entity !== "factory" ? topWebsiteProducts(from, to, 10) : Promise.resolve([]),
+    shopifyOn ? topWebsiteProducts(from, to, 10, entity) : Promise.resolve([]),
   ]);
   const net = netOf(totals);
   const netSales = totals.sale.total - totals.return.total;

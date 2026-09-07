@@ -1,9 +1,9 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { ensureStockBaseline, getStockBaseline, loadConnection, WEBHOOK_TOPICS } from "@/lib/shopify-oauth";
+import { listConnectedAuths, setStoreWebhooks, WEBHOOK_TOPICS, type StoreAuth } from "@/lib/shopify-oauth";
 import { desc, eq, isNull, and, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { businessRecords, products, settings, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
+import { businessRecords, products, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
 import { adjustStock } from "@/lib/stock";
 import { toPaise } from "@/lib/money";
 import { toYmd } from "@/lib/dates";
@@ -12,44 +12,16 @@ import { toYmd } from "@/lib/dates";
 /* Config & client                                                     */
 /* ------------------------------------------------------------------ */
 
-export type ShopifyAuth = { shop: string; token: string; version: string; source: "env" | "oauth" };
-
-export function shopifyApiVersion() {
-  return process.env.SHOPIFY_API_VERSION?.trim() || "2026-07";
-}
-
-/** Credentials from the environment (manual token) or from the OAuth install stored in the database. */
-export async function getShopifyAuth(): Promise<ShopifyAuth | null> {
-  const version = shopifyApiVersion();
-  const shop = process.env.SHOPIFY_STORE_DOMAIN?.trim().toLowerCase();
-  const token = process.env.SHOPIFY_ADMIN_TOKEN?.trim();
-  if (shop && token) return { shop, token, version, source: "env" };
-  const conn = await loadConnection();
-  if (conn) return { shop: conn.shop, token: conn.token, version, source: "oauth" };
-  return null;
-}
+export type { StoreAuth } from "@/lib/shopify-oauth";
+export { shopifyApiVersion } from "@/lib/shopify-oauth";
 
 export async function isShopifyConfigured() {
-  return !!(await getShopifyAuth());
+  return (await listConnectedAuths()).length > 0;
 }
 
-/** Everything the settings page needs to explain the current state. */
-export async function shopifyStatus() {
-  const auth = await getShopifyAuth();
-  const conn = auth?.source === "oauth" ? await loadConnection() : null;
-  return {
-    configured: !!auth,
-    source: auth?.source ?? null,
-    shop: auth?.shop ?? process.env.SHOPIFY_STORE_DOMAIN?.trim() ?? null,
-    version: shopifyApiVersion(),
-    scope: conn?.scope ?? null,
-    installedAt: conn?.installedAt ?? null,
-    webhooks: conn?.webhooks ?? [],
-    clientIdSet: !!process.env.SHOPIFY_CLIENT_ID?.trim(),
-    clientSecretSet: !!process.env.SHOPIFY_CLIENT_SECRET?.trim(),
-    webhookSecretSet: !!(process.env.SHOPIFY_WEBHOOK_SECRET?.trim() || process.env.SHOPIFY_CLIENT_SECRET?.trim()),
-    tokenTail: auth?.token ? auth.token.slice(-4) : null,
-  };
+/** The first connected store (used where a single default is enough, e.g. the settings test). */
+export async function getShopifyAuth(): Promise<StoreAuth | null> {
+  return (await listConnectedAuths())[0] ?? null;
 }
 
 type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string; extensions?: { code?: string } }> };
@@ -57,15 +29,13 @@ type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string; extensio
 function friendlyShopifyError(messages: string[]) {
   const text = messages.join("; ");
   if (/protected customer data/i.test(text)) {
-    return "Shopify blocked customer fields: in the Dev Dashboard open the app → API access → Protected customer data access, request access to customer data plus name, address, email and phone, save, then sync again.";
+    return "Shopify blocked customer fields: in the Dev Dashboard open the app → Protected customer data access, request access to customer data plus name, address, email and phone, save, then sync again.";
   }
   if (/access denied|not approved|scope/i.test(text)) return `Shopify refused the request (${text}). Check the app's scopes and reinstall from Settings → Shopify.`;
   return `Shopify error: ${text}`;
 }
 
-export async function shopifyGraphQL<T>(query: string, variables: Record<string, unknown> = {}, attempt = 0, authOverride?: ShopifyAuth): Promise<T> {
-  const auth = authOverride ?? (await getShopifyAuth());
-  if (!auth) throw new Error("Shopify is not connected. Open Settings → Shopify to connect the store.");
+export async function shopifyGraphQL<T>(query: string, variables: Record<string, unknown>, auth: StoreAuth, attempt = 0): Promise<T> {
   const res = await fetch(`https://${auth.shop}/admin/api/${auth.version}/graphql.json`, {
     method: "POST",
     headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": auth.token },
@@ -74,40 +44,40 @@ export async function shopifyGraphQL<T>(query: string, variables: Record<string,
   });
   if (res.status === 429 && attempt < 4) {
     await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
-    return shopifyGraphQL<T>(query, variables, attempt + 1, authOverride);
+    return shopifyGraphQL<T>(query, variables, auth, attempt + 1);
   }
-  if (res.status === 401 || res.status === 403) throw new Error("Shopify rejected the access token. Reconnect the store from Settings → Shopify.");
-  if (!res.ok) throw new Error(`Shopify returned HTTP ${res.status}`);
+  if (res.status === 401 || res.status === 403) throw new Error(`${auth.label}: Shopify rejected the access token. Reconnect the store from Settings → Shopify.`);
+  if (!res.ok) throw new Error(`${auth.label}: Shopify returned HTTP ${res.status}`);
   const json = (await res.json()) as GraphQLResponse<T>;
   if (json.errors?.length) {
     if (json.errors.some((e) => e.extensions?.code === "THROTTLED") && attempt < 4) {
       await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-      return shopifyGraphQL<T>(query, variables, attempt + 1, authOverride);
+      return shopifyGraphQL<T>(query, variables, auth, attempt + 1);
     }
-    throw new Error(friendlyShopifyError(json.errors.map((e) => e.message)));
+    throw new Error(`${auth.label}: ${friendlyShopifyError(json.errors.map((e) => e.message))}`);
   }
-  if (!json.data) throw new Error("Shopify returned no data");
+  if (!json.data) throw new Error(`${auth.label}: Shopify returned no data`);
   return json.data;
 }
 
-/** Webhooks registered by the app are signed with the client secret; ones created in the admin UI use the store's webhook secret. */
-export function verifyShopifyWebhook(rawBody: string, hmacHeader: string | null): boolean {
+/** Webhooks registered by an app are signed with that app's client secret. */
+export function verifyShopifyWebhook(rawBody: string, hmacHeader: string | null, secrets: Array<string | null | undefined>): boolean {
   if (!hmacHeader) return false;
-  const secrets = [process.env.SHOPIFY_WEBHOOK_SECRET?.trim(), process.env.SHOPIFY_CLIENT_SECRET?.trim()].filter((s): s is string => !!s);
   const given = Buffer.from(hmacHeader);
-  return secrets.some((secret) => {
-    const digest = Buffer.from(createHmac("sha256", secret).update(rawBody, "utf8").digest("base64"));
-    return digest.length === given.length && timingSafeEqual(digest, given);
-  });
+  return secrets
+    .filter((s): s is string => !!s)
+    .some((secret) => {
+      const digest = Buffer.from(createHmac("sha256", secret).update(rawBody, "utf8").digest("base64"));
+      return digest.length === given.length && timingSafeEqual(digest, given);
+    });
 }
 
 /** Make sure the store sends us the events we rely on. Returns the topics now subscribed to our URL. */
-export async function registerWebhooks(appUrl: string, auth?: ShopifyAuth): Promise<string[]> {
+export async function registerWebhooks(appUrl: string, auth: StoreAuth): Promise<string[]> {
   const callback = `${appUrl.replace(/\/$/, "")}/api/webhooks/shopify`;
   const existing: { webhookSubscriptions: { nodes: Array<{ id: string; topic: string; endpoint: { __typename: string; callbackUrl?: string } }> } } = await shopifyGraphQL(
     `{ webhookSubscriptions(first: 100) { nodes { id topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } } } }`,
     {},
-    0,
     auth,
   );
   const have = new Set(existing.webhookSubscriptions.nodes.filter((n) => n.endpoint?.callbackUrl === callback).map((n) => n.topic));
@@ -118,7 +88,6 @@ export async function registerWebhooks(appUrl: string, auth?: ShopifyAuth): Prom
         webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) { webhookSubscription { id } userErrors { message } }
       }`,
       { topic, sub: { uri: callback, format: "JSON" } },
-      0,
       auth,
     );
     if (r.webhookSubscriptionCreate.userErrors.length) throw new Error(`Could not register ${topic}: ${r.webhookSubscriptionCreate.userErrors.map((e) => e.message).join(", ")}`);
@@ -197,7 +166,7 @@ const ORDER_FIELDS = `
   }
 `;
 
-async function* iterateOrders(query: string) {
+async function* iterateOrders(query: string, auth: StoreAuth) {
   let after: string | null = null;
   for (;;) {
     const data: { orders: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: OrderNode[] } } = await shopifyGraphQL(
@@ -208,6 +177,7 @@ async function* iterateOrders(query: string) {
         }
       }`,
       { first: 25, after, query },
+      auth,
     );
     for (const node of data.orders.nodes) yield node;
     if (!data.orders.pageInfo.hasNextPage) break;
@@ -215,10 +185,8 @@ async function* iterateOrders(query: string) {
   }
 }
 
-export async function fetchOrderById(numericId: string): Promise<OrderNode | null> {
-  const data: { order: OrderNode | null } = await shopifyGraphQL(`query Order($id: ID!) { order(id: $id) { ${ORDER_FIELDS} } }`, {
-    id: `gid://shopify/Order/${numericId}`,
-  });
+export async function fetchOrderById(numericId: string, auth: StoreAuth): Promise<OrderNode | null> {
+  const data: { order: OrderNode | null } = await shopifyGraphQL(`query Order($id: ID!) { order(id: $id) { ${ORDER_FIELDS} } }`, { id: `gid://shopify/Order/${numericId}` }, auth);
   return data.order;
 }
 
@@ -231,7 +199,7 @@ type ProductNode = {
   variants: { nodes: Array<{ id: string; title: string; sku: string | null; price: string; inventoryQuantity: number | null; image: { url: string } | null }> };
 };
 
-async function* iterateProducts() {
+async function* iterateProducts(auth: StoreAuth) {
   let after: string | null = null;
   for (;;) {
     const data: { products: { pageInfo: { hasNextPage: boolean; endCursor: string | null }; nodes: ProductNode[] } } = await shopifyGraphQL(
@@ -246,6 +214,7 @@ async function* iterateProducts() {
         }
       }`,
       { first: 50, after },
+      auth,
     );
     for (const node of data.products.nodes) yield node;
     if (!data.products.pageInfo.hasNextPage) break;
@@ -253,10 +222,11 @@ async function* iterateProducts() {
   }
 }
 
-export async function fetchProductById(numericId: string): Promise<ProductNode | null> {
+export async function fetchProductById(numericId: string, auth: StoreAuth): Promise<ProductNode | null> {
   const data: { product: ProductNode | null } = await shopifyGraphQL(
     `query Product($id: ID!) { product(id: $id) { id title productType status featuredMedia { preview { image { url } } } variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } } } } }`,
     { id: `gid://shopify/Product/${numericId}` },
+    auth,
   );
   return data.product;
 }
@@ -267,12 +237,12 @@ export async function fetchProductById(numericId: string): Promise<ProductNode |
 
 const money = (m: Money | null | undefined) => (m ? toPaise(m.shopMoney.amount) : 0);
 
-export async function upsertProductFromShopify(node: ProductNode) {
+export async function upsertProductFromShopify(node: ProductNode, auth: StoreAuth) {
   let n = 0;
   for (const v of node.variants.nodes) {
     const variantId = gidToId(v.id)!;
     const values = {
-      brandId: "babygambling",
+      brandId: auth.brandId,
       name: node.title.trim(),
       variant: v.title === "Default Title" ? "" : v.title.trim(),
       sku: v.sku?.trim() || null,
@@ -291,6 +261,7 @@ export async function upsertProductFromShopify(node: ProductNode) {
       .onConflictDoUpdate({
         target: products.shopifyVariantId,
         set: {
+          brandId: values.brandId,
           name: values.name,
           variant: values.variant,
           sku: values.sku,
@@ -322,7 +293,7 @@ function mapLines(node: OrderNode): ShopifyLine[] {
 }
 
 /** Store the order and apply its effects on sales records and finished stock (idempotent). */
-export async function upsertOrderFromShopify(node: OrderNode) {
+export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
   const id = gidToId(node.id)!;
   const lines = mapLines(node);
   const gateway = node.paymentGatewayNames?.[0] ?? null;
@@ -355,6 +326,9 @@ export async function upsertOrderFromShopify(node: OrderNode) {
     cancelReason: node.cancelReason,
     closedAt: node.closedAt ? new Date(node.closedAt) : null,
     lineItems: lines,
+    shop: auth.shop,
+    brandId: auth.brandId,
+    entityId: auth.entityId,
     note: node.note,
     syncedAt: new Date(),
   };
@@ -382,11 +356,11 @@ export async function upsertOrderFromShopify(node: OrderNode) {
       }
     } else if (!sale) {
       await tx.insert(businessRecords).values({
-        entityId: "brand",
+        entityId: auth.entityId,
         kind: "sale",
         workDate,
         amountP: row.totalP,
-        channel: "Own website",
+        channel: auth.channel,
         category: "Website order",
         reference: node.name,
         paymentMethod: isCod ? "cod" : "gateway",
@@ -417,11 +391,11 @@ export async function upsertOrderFromShopify(node: OrderNode) {
       await tx
         .insert(businessRecords)
         .values({
-          entityId: "brand",
+          entityId: auth.entityId,
           kind: "return",
           workDate: toYmd(new Date(refund.createdAt)),
           amountP: amount,
-          channel: "Own website",
+          channel: auth.channel,
           category: "Website refund",
           reference: node.name,
           paymentMethod: isCod ? "cod" : "gateway",
@@ -436,7 +410,7 @@ export async function upsertOrderFromShopify(node: OrderNode) {
     // Finished stock: deduct once when fulfilled, put back once when cancelled/restocked.
     // Orders placed before the stock baseline (when the store was connected) never touch stock,
     // because the quantities on hand at that time were not in the system.
-    const baseline = await getStockBaseline();
+    const baseline = auth.baselineAt;
     const touchesStock = !baseline || new Date(node.createdAt) >= baseline;
     const fulfilled = touchesStock && node.displayFulfillmentStatus === "FULFILLED";
     const restocked = touchesStock && (node.displayFulfillmentStatus === "RESTOCKED" || cancelled);
@@ -468,67 +442,92 @@ export async function upsertOrderFromShopify(node: OrderNode) {
 
 const running = { current: false };
 
-export async function getLastSync() {
-  const [run] = await db.select().from(syncRuns).orderBy(desc(syncRuns.startedAt)).limit(1);
-  const [lastOk] = await db.select().from(syncRuns).where(eq(syncRuns.status, "ok")).orderBy(desc(syncRuns.startedAt)).limit(1);
+export async function getLastSync(shop?: string) {
+  const where = shop ? eq(syncRuns.shop, shop) : undefined;
+  const [run] = await db.select().from(syncRuns).where(where).orderBy(desc(syncRuns.startedAt)).limit(1);
+  const [lastOk] = await db
+    .select()
+    .from(syncRuns)
+    .where(shop ? and(eq(syncRuns.status, "ok"), eq(syncRuns.shop, shop)) : eq(syncRuns.status, "ok"))
+    .orderBy(desc(syncRuns.startedAt))
+    .limit(1);
   return { last: run ?? null, lastOk: lastOk ?? null };
 }
 
-export async function syncShopify(opts: { trigger?: string; sinceDays?: number; full?: boolean } = {}) {
-  if (!(await isShopifyConfigured())) throw new Error("Shopify is not connected. Open Settings → Shopify to connect the store.");
-  if (running.current) return { skipped: true as const };
-  running.current = true;
-  await ensureStockBaseline();
-  const [run] = await db.insert(syncRuns).values({ trigger: opts.trigger ?? "manual" }).returning();
+async function syncStore(auth: StoreAuth, opts: { trigger?: string; sinceDays?: number; full?: boolean }) {
+  const [run] = await db.insert(syncRuns).values({ trigger: opts.trigger ?? "manual", shop: auth.shop }).returning();
   let ordersUpserted = 0;
   let productsUpserted = 0;
   try {
-    const { lastOk } = await getLastSync();
+    const { lastOk } = await getLastSync(auth.shop);
     let since: Date;
     if (opts.full) since = new Date(Date.now() - (opts.sinceDays ?? 60) * 86_400_000);
     else if (lastOk) since = new Date(lastOk.startedAt.getTime() - 2 * 3_600_000);
     else since = new Date(Date.now() - (opts.sinceDays ?? 30) * 86_400_000);
 
-    for await (const node of iterateProducts()) productsUpserted += await upsertProductFromShopify(node);
-    for await (const node of iterateOrders(`updated_at:>='${since.toISOString()}'`)) {
-      await upsertOrderFromShopify(node);
+    for await (const node of iterateProducts(auth)) productsUpserted += await upsertProductFromShopify(node, auth);
+    for await (const node of iterateOrders(`updated_at:>='${since.toISOString()}'`, auth)) {
+      await upsertOrderFromShopify(node, auth);
       ordersUpserted++;
     }
-
     await db.update(syncRuns).set({ status: "ok", finishedAt: new Date(), ordersUpserted, productsUpserted, message: `Since ${since.toISOString()}` }).where(eq(syncRuns.id, run.id));
-    await db
-      .insert(settings)
-      .values({ key: "shopify.lastSyncAt", value: new Date().toISOString() })
-      .onConflictDoUpdate({ target: settings.key, set: { value: new Date().toISOString() } });
-    return { skipped: false as const, ordersUpserted, productsUpserted };
+    return { ordersUpserted, productsUpserted };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await db.update(syncRuns).set({ status: "error", finishedAt: new Date(), ordersUpserted, productsUpserted, message }).where(eq(syncRuns.id, run.id));
     throw err;
+  }
+}
+
+/** Sync every connected store (or one store). Stores are synced one after another; one failure does not stop the others. */
+export async function syncShopify(opts: { trigger?: string; sinceDays?: number; full?: boolean; storeId?: string } = {}) {
+  const auths = (await listConnectedAuths()).filter((a) => !opts.storeId || a.storeId === opts.storeId);
+  if (!auths.length) throw new Error("No Shopify store is connected. Open Settings → Shopify to connect one.");
+  if (running.current) return { skipped: true as const };
+  running.current = true;
+  try {
+    let ordersUpserted = 0;
+    let productsUpserted = 0;
+    const errors: string[] = [];
+    for (const auth of auths) {
+      try {
+        const r = await syncStore(auth, opts);
+        ordersUpserted += r.ordersUpserted;
+        productsUpserted += r.productsUpserted;
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : String(err));
+      }
+    }
+    if (errors.length === auths.length) throw new Error(errors.join(" | "));
+    return { skipped: false as const, ordersUpserted, productsUpserted, stores: auths.length, errors };
   } finally {
     running.current = false;
   }
 }
 
 /** Fetch one order from Shopify and store it (used by webhooks). */
-export async function syncSingleOrder(numericId: string) {
-  const node = await fetchOrderById(numericId);
-  if (node) await upsertOrderFromShopify(node);
+export async function syncSingleOrder(numericId: string, auth: StoreAuth) {
+  const node = await fetchOrderById(numericId, auth);
+  if (node) await upsertOrderFromShopify(node, auth);
   return !!node;
 }
 
-export async function syncSingleProduct(numericId: string) {
-  const node = await fetchProductById(numericId);
-  if (node) await upsertProductFromShopify(node);
+export async function syncSingleProduct(numericId: string, auth: StoreAuth) {
+  const node = await fetchProductById(numericId, auth);
+  if (node) await upsertProductFromShopify(node, auth);
   return !!node;
 }
 
 /** Quick connectivity check for the settings page. */
-export async function testShopifyConnection() {
-  const data: { shop: { name: string; myshopifyDomain: string; currencyCode: string; plan?: { displayName: string } } } = await shopifyGraphQL(
-    `{ shop { name myshopifyDomain currencyCode } }`,
-  );
+export async function testShopifyConnection(auth: StoreAuth) {
+  const data: { shop: { name: string; myshopifyDomain: string; currencyCode: string } } = await shopifyGraphQL(`{ shop { name myshopifyDomain currencyCode } }`, {}, auth);
   return data.shop;
+}
+
+export async function refreshStoreWebhooks(appUrl: string, auth: StoreAuth) {
+  const topics = await registerWebhooks(appUrl, auth);
+  await setStoreWebhooks(auth.storeId, topics);
+  return topics;
 }
 
 export async function countOrdersNeedingAttention() {

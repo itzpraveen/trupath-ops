@@ -14,7 +14,7 @@ export function startScheduler(minutes: number) {
         return;
       }
       const r = await syncShopify({ trigger });
-      if (!r.skipped) console.log(`[scheduler] shopify sync ok: ${r.ordersUpserted} orders, ${r.productsUpserted} variants`);
+      if (!r.skipped) console.log(`[scheduler] shopify sync ok: ${r.ordersUpserted} orders, ${r.productsUpserted} variants across ${r.stores} store(s)${r.errors.length ? `; errors: ${r.errors.join(" | ")}` : ""}`);
     } catch (err) {
       console.error("[scheduler] shopify sync failed:", err instanceof Error ? err.message : err);
     }

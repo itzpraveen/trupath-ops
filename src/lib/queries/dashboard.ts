@@ -126,16 +126,17 @@ export async function recentRecords(limit = 8) {
     .limit(limit);
 }
 
-export async function ordersSummary(todayFrom: Date, monthFrom: string, monthTo: string) {
-  const [today] = await db.select({ n: sql<number>`count(*)::int` }).from(shopifyOrders).where(and(gte(shopifyOrders.createdAtShop, todayFrom), isNull(shopifyOrders.cancelledAt)));
+export async function ordersSummary(todayFrom: Date, monthFrom: string, monthTo: string, entity = "all") {
+  const ent = entity === "all" ? undefined : eq(shopifyOrders.entityId, entity);
+  const [today] = await db.select({ n: sql<number>`count(*)::int` }).from(shopifyOrders).where(and(gte(shopifyOrders.createdAtShop, todayFrom), isNull(shopifyOrders.cancelledAt), ent));
   const [open] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(shopifyOrders)
-    .where(and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`));
+    .where(and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`, ent));
   const [month] = await db
     .select({ n: sql<number>`count(*)::int`, total: sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` })
     .from(shopifyOrders)
-    .where(and(isNull(shopifyOrders.cancelledAt), sql`(${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${monthFrom}::date and ${monthTo}::date`));
-  const recent = await db.select().from(shopifyOrders).orderBy(desc(shopifyOrders.createdAtShop)).limit(5);
+    .where(and(isNull(shopifyOrders.cancelledAt), sql`(${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${monthFrom}::date and ${monthTo}::date`, ent));
+  const recent = await db.select().from(shopifyOrders).where(ent).orderBy(desc(shopifyOrders.createdAtShop)).limit(5);
   return { today: Number(today?.n ?? 0), open: Number(open?.n ?? 0), monthCount: Number(month?.n ?? 0), monthTotal: Number(month?.total ?? 0), recent };
 }

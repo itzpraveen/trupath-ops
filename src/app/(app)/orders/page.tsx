@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { and, count, desc, ilike, isNull, isNotNull, or, sql } from "drizzle-orm";
+import { and, count, desc, eq, ilike, isNull, isNotNull, or, sql } from "drizzle-orm";
 import { Download } from "lucide-react";
 import { cn } from "cn";
 import { db } from "@/db";
@@ -11,6 +11,8 @@ import { formatINR } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
 import { ordersSummary } from "@/lib/queries/dashboard";
 import { getLastSync, isShopifyConfigured } from "@/lib/shopify";
+import { listStores } from "@/lib/shopify-oauth";
+import { BRAND_LABEL } from "@/lib/constants";
 import { int, pick, qs, str } from "@/lib/url";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -43,6 +45,8 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
   const sp = await props.searchParams;
   const configured = await isShopifyConfigured();
   const status = pick(sp.status, ["all", "toship", "shipped", "cancelled"], "toship");
+  const stores = await listStores();
+  const storeShop = pick(sp.store, ["all", ...stores.map((s) => s.shop)], "all");
   const q = str(sp.q, 80);
   const page = int(sp.page);
   const editable = canEdit(user.role, "orders");
@@ -67,6 +71,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
   const where = and(
     status === "toship" ? and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`) : status === "shipped" ? sql`${shopifyOrders.fulfillmentStatus} = 'FULFILLED'` : status === "cancelled" ? isNotNull(shopifyOrders.cancelledAt) : undefined,
     q ? or(ilike(shopifyOrders.name, `%${q}%`), ilike(shopifyOrders.customerName, `%${q}%`), ilike(shopifyOrders.phone, `%${q}%`), ilike(shopifyOrders.email, `%${q}%`), ilike(shopifyOrders.city, `%${q}%`)) : undefined,
+    storeShop === "all" ? undefined : eq(shopifyOrders.shop, storeShop),
   );
   const month = monthKey();
   const [mFrom, mTo] = monthRange(month);
@@ -76,7 +81,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
     ordersSummary(new Date(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) + "T00:00:00+05:30"), mFrom, mTo),
     getLastSync(),
   ]);
-  const params = { status, q: q || undefined };
+  const params = { status, q: q || undefined, store: storeShop === "all" ? undefined : storeShop };
   const pages = Math.max(1, Math.ceil(Number(total) / PAGE));
 
   return (
@@ -93,6 +98,15 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
         <Stat label="This month" value={summary.monthCount} hint="orders" />
         <Stat label="Revenue this month" value={formatINR(summary.monthTotal)} />
       </StatGrid>
+      {stores.length > 1 ? (
+        <div className="mb-3 flex flex-wrap items-center gap-1 text-sm">
+          {[["all", "All stores"], ...stores.map((s) => [s.shop, s.label])].map(([v, l]) => (
+            <Link key={v} href={`/orders${qs({ ...params, store: v === "all" ? undefined : v, page: undefined })}`} className={cn("rounded-full px-3 py-1", storeShop === v ? "bg-foreground text-background" : "border bg-card text-muted-foreground hover:text-foreground")}>
+              {l}
+            </Link>
+          ))}
+        </div>
+      ) : null}
       <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap gap-1 rounded-lg bg-muted p-1 text-sm">
           {[
@@ -108,6 +122,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
         </div>
         <form className="flex items-center gap-2" action="/orders">
           <input type="hidden" name="status" value={status} />
+          {storeShop !== "all" ? <input type="hidden" name="store" value={storeShop} /> : null}
           <Input name="q" defaultValue={q} placeholder="Order no., name, phone, city…" className="w-56" />
           <Button type="submit" variant="outline" size="sm">
             Search
@@ -137,6 +152,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
                     <Link href={`/orders/${o.id}`} className="font-medium hover:underline">
                       {o.name}
                     </Link>
+                    {stores.length > 1 ? <span className="block text-xs text-muted-foreground">{BRAND_LABEL[o.brandId ?? ""] ?? o.brandId ?? ""}</span> : null}
                   </TableCell>
                   <TableCell className="whitespace-nowrap text-muted-foreground">{formatDateTime(o.createdAtShop)}</TableCell>
                   <TableCell>

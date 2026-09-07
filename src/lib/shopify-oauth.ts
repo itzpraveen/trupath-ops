@@ -1,20 +1,30 @@
 import "server-only";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { db } from "@/db";
-import { settings } from "@/db/schema";
+import { shopifyStores, type ShopifyStore } from "@/db/schema";
 
 /** Admin API scopes the app asks for during install. */
 export const SHOPIFY_SCOPES = ["read_orders", "read_all_orders", "read_products", "read_inventory", "read_customers"] as const;
 export const WEBHOOK_TOPICS = ["ORDERS_CREATE", "ORDERS_UPDATED", "ORDERS_CANCELLED", "REFUNDS_CREATE", "PRODUCTS_UPDATE"] as const;
 
-export type ShopifyConnection = { shop: string; token: string; scope: string; installedAt: string; webhooks: string[] };
-type StoredConnection = { shop: string; tokenEnc: string; scope: string; installedAt: string; webhooks: string[] };
-const KEY = "shopify.connection";
+export type StoreAuth = {
+  storeId: string;
+  shop: string;
+  label: string;
+  token: string;
+  version: string;
+  brandId: string;
+  entityId: string;
+  channel: string;
+  baselineAt: Date | null;
+};
+
+/* ---------------- encryption ---------------- */
 
 function encKey() {
-  const secret = process.env.SHOPIFY_CLIENT_SECRET?.trim();
-  if (!secret) throw new Error("SHOPIFY_CLIENT_SECRET is not set");
+  const secret = process.env.APP_ENCRYPTION_KEY?.trim() || process.env.SHOPIFY_CLIENT_SECRET?.trim();
+  if (!secret) throw new Error("Set APP_ENCRYPTION_KEY (or SHOPIFY_CLIENT_SECRET) on the server so store secrets can be stored safely.");
   return createHash("sha256").update(secret).digest();
 }
 export function encryptSecret(text: string) {
@@ -29,47 +39,108 @@ export function decryptSecret(b64: string) {
   decipher.setAuthTag(buf.subarray(12, 28));
   return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString("utf8");
 }
-
-let cache: { at: number; value: ShopifyConnection | null } | null = null;
-
-export async function loadConnection(): Promise<ShopifyConnection | null> {
-  if (cache && Date.now() - cache.at < 30_000) return cache.value;
-  const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1);
-  let value: ShopifyConnection | null = null;
-  if (row) {
-    try {
-      const v = row.value as StoredConnection;
-      value = { shop: v.shop, token: decryptSecret(v.tokenEnc), scope: v.scope, installedAt: v.installedAt, webhooks: v.webhooks ?? [] };
-    } catch {
-      value = null; // secret changed or row corrupt; treat as disconnected
-    }
+function tryDecrypt(b64: string | null | undefined): string | null {
+  if (!b64) return null;
+  try {
+    return decryptSecret(b64);
+  } catch {
+    return null;
   }
-  cache = { at: Date.now(), value };
-  return value;
 }
 
-export async function saveConnection(c: ShopifyConnection) {
-  const value: StoredConnection = { shop: c.shop, tokenEnc: encryptSecret(c.token), scope: c.scope, installedAt: c.installedAt, webhooks: c.webhooks };
-  await db.insert(settings).values({ key: KEY, value }).onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } });
-  cache = null;
-}
+/* ---------------- stores ---------------- */
 
-export async function clearConnection() {
-  await db.delete(settings).where(eq(settings.key, KEY));
-  cache = null;
+export function shopifyApiVersion() {
+  return process.env.SHOPIFY_API_VERSION?.trim() || "2026-07";
 }
 
 export function isValidShop(shop: string) {
   return /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/i.test(shop);
 }
 
-export function oauthClient() {
-  return { clientId: process.env.SHOPIFY_CLIENT_ID?.trim(), clientSecret: process.env.SHOPIFY_CLIENT_SECRET?.trim() };
+export async function listStores(): Promise<ShopifyStore[]> {
+  return db.select().from(shopifyStores).orderBy(asc(shopifyStores.createdAt));
+}
+export async function getStore(id: string): Promise<ShopifyStore | null> {
+  if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
+  const [row] = await db.select().from(shopifyStores).where(eq(shopifyStores.id, id)).limit(1);
+  return row ?? null;
+}
+export async function getStoreByShop(shop: string): Promise<ShopifyStore | null> {
+  const [row] = await db.select().from(shopifyStores).where(eq(shopifyStores.shop, shop.toLowerCase())).limit(1);
+  return row ?? null;
 }
 
-export function buildAuthorizeUrl(shop: string, state: string, redirectUri: string) {
-  const { clientId } = oauthClient();
-  if (!clientId) throw new Error("SHOPIFY_CLIENT_ID is not set");
+/** The store's own app credentials, else the ones from the environment (first store). */
+export function storeCredentials(store: ShopifyStore): { clientId: string | null; clientSecret: string | null } {
+  const ownSecret = tryDecrypt(store.clientSecretEnc);
+  const envShop = process.env.SHOPIFY_STORE_DOMAIN?.trim().toLowerCase();
+  const envApplies = !envShop || envShop === store.shop; // the environment credentials belong to the env store only
+  return {
+    clientId: store.clientId ?? (envApplies ? process.env.SHOPIFY_CLIENT_ID?.trim() ?? null : null),
+    clientSecret: ownSecret ?? (envApplies ? process.env.SHOPIFY_CLIENT_SECRET?.trim() ?? null : null),
+  };
+}
+
+/** Access token: the installed token, or the legacy env token for the env store. */
+export function storeToken(store: ShopifyStore): string | null {
+  const own = tryDecrypt(store.tokenEnc);
+  if (own) return own;
+  const envShop = process.env.SHOPIFY_STORE_DOMAIN?.trim().toLowerCase();
+  const envToken = process.env.SHOPIFY_ADMIN_TOKEN?.trim();
+  if (envShop === store.shop && envToken) return envToken;
+  return null;
+}
+
+export function storeAuth(store: ShopifyStore): StoreAuth | null {
+  const token = storeToken(store);
+  if (!token || !store.active) return null;
+  return { storeId: store.id, shop: store.shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt };
+}
+
+export async function listConnectedAuths(): Promise<StoreAuth[]> {
+  return (await listStores()).map(storeAuth).filter((a): a is StoreAuth => !!a);
+}
+
+export async function upsertStore(input: { id?: string; shop: string; label: string; brandId: string; entityId: string; channel: string; clientId?: string | null; clientSecret?: string | null; active?: boolean }) {
+  const values = {
+    shop: input.shop.toLowerCase(),
+    label: input.label,
+    brandId: input.brandId,
+    entityId: input.entityId,
+    channel: input.channel,
+    ...(input.clientId !== undefined ? { clientId: input.clientId || null } : {}),
+    ...(input.clientSecret ? { clientSecretEnc: encryptSecret(input.clientSecret) } : {}),
+    ...(input.active !== undefined ? { active: input.active } : {}),
+  };
+  if (input.id) {
+    await db.update(shopifyStores).set(values).where(eq(shopifyStores.id, input.id));
+    return input.id;
+  }
+  const [row] = await db.insert(shopifyStores).values(values).returning({ id: shopifyStores.id });
+  return row.id;
+}
+
+export async function saveStoreToken(storeId: string, data: { token: string; scope: string; webhooks: string[] }) {
+  const [existing] = await db.select({ baselineAt: shopifyStores.baselineAt }).from(shopifyStores).where(eq(shopifyStores.id, storeId)).limit(1);
+  const now = new Date();
+  await db
+    .update(shopifyStores)
+    .set({ tokenEnc: encryptSecret(data.token), scope: data.scope, webhooks: data.webhooks, installedAt: now, baselineAt: existing?.baselineAt ?? now })
+    .where(eq(shopifyStores.id, storeId));
+}
+
+export async function setStoreWebhooks(storeId: string, webhooks: string[]) {
+  await db.update(shopifyStores).set({ webhooks }).where(eq(shopifyStores.id, storeId));
+}
+
+export async function clearStoreToken(storeId: string) {
+  await db.update(shopifyStores).set({ tokenEnc: null, scope: null, installedAt: null, webhooks: [] }).where(eq(shopifyStores.id, storeId));
+}
+
+/* ---------------- OAuth helpers ---------------- */
+
+export function buildAuthorizeUrl(shop: string, clientId: string, state: string, redirectUri: string) {
   const u = new URL(`https://${shop}/admin/oauth/authorize`);
   u.searchParams.set("client_id", clientId);
   u.searchParams.set("scope", SHOPIFY_SCOPES.join(","));
@@ -79,8 +150,7 @@ export function buildAuthorizeUrl(shop: string, state: string, redirectUri: stri
 }
 
 /** Verify the hmac Shopify appends to the OAuth callback query string. */
-export function verifyOAuthHmac(params: URLSearchParams) {
-  const { clientSecret } = oauthClient();
+export function verifyOAuthHmac(params: URLSearchParams, clientSecret: string) {
   const hmac = params.get("hmac");
   if (!clientSecret || !hmac) return false;
   const esc = (s: string) => s.replace(/%/g, "%25").replace(/&/g, "%26").replace(/=/g, "%3D");
@@ -95,9 +165,7 @@ export function verifyOAuthHmac(params: URLSearchParams) {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export async function exchangeCodeForToken(shop: string, code: string): Promise<{ token: string; scope: string }> {
-  const { clientId, clientSecret } = oauthClient();
-  if (!clientId || !clientSecret) throw new Error("SHOPIFY_CLIENT_ID / SHOPIFY_CLIENT_SECRET are not set");
+export async function exchangeCodeForToken(shop: string, code: string, clientId: string, clientSecret: string): Promise<{ token: string; scope: string }> {
   const res = await fetch(`https://${shop}/admin/oauth/access_token`, {
     method: "POST",
     headers: { "Content-Type": "application/json", Accept: "application/json" },
@@ -107,30 +175,4 @@ export async function exchangeCodeForToken(shop: string, code: string): Promise<
   const json = (await res.json().catch(() => ({}))) as { access_token?: string; scope?: string; error?: string; error_description?: string };
   if (!res.ok || !json.access_token) throw new Error(`Shopify did not issue a token: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
   return { token: json.access_token, scope: json.scope ?? "" };
-}
-
-/* ------------------------------------------------------------------ */
-/* Stock baseline: orders placed before this moment never change stock */
-/* ------------------------------------------------------------------ */
-const BASELINE_KEY = "shopify.stockBaselineAt";
-let baselineCache: { at: number; value: Date | null } | null = null;
-
-export async function getStockBaseline(): Promise<Date | null> {
-  if (baselineCache && Date.now() - baselineCache.at < 30_000) return baselineCache.value;
-  const [row] = await db.select().from(settings).where(eq(settings.key, BASELINE_KEY)).limit(1);
-  const value = row && typeof row.value === "string" ? new Date(row.value) : null;
-  baselineCache = { at: Date.now(), value: value && !Number.isNaN(value.getTime()) ? value : null };
-  return baselineCache.value;
-}
-
-/** Set the baseline once (first connection or first sync); later calls keep the earlier date. */
-export async function ensureStockBaseline(candidate = new Date()): Promise<Date> {
-  const existing = await getStockBaseline();
-  if (existing) return existing;
-  const conn = await loadConnection();
-  const installedAt = conn?.installedAt ? new Date(conn.installedAt) : null;
-  const value = installedAt && !Number.isNaN(installedAt.getTime()) ? installedAt : candidate;
-  await db.insert(settings).values({ key: BASELINE_KEY, value: value.toISOString() }).onConflictDoNothing();
-  baselineCache = null;
-  return (await getStockBaseline()) ?? candidate;
 }

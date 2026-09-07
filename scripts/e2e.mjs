@@ -5,7 +5,7 @@ import fs from "node:fs";
 // Usage: pnpm build && PORT=3100 pnpm start &  then  pnpm test:e2e
 const BASE = process.env.E2E_BASE_URL ?? "http://localhost:3100";
 const CHROME = process.env.CHROME_PATH ?? "/usr/bin/google-chrome";
-const OWNER_EMAIL = process.env.E2E_OWNER_EMAIL ?? OWNER_EMAIL;
+const OWNER_EMAIL = process.env.E2E_OWNER_EMAIL ?? "owner@trupaths.in";
 const OWNER_PASSWORD = process.env.E2E_OWNER_PASSWORD ?? "change-me-now";
 const OUT = process.argv[2] ?? "./e2e-shots";
 fs.mkdirSync(OUT, { recursive: true });
