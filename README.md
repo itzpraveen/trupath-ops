@@ -49,7 +49,7 @@ Useful scripts: `pnpm db:generate` (new migration after editing `src/db/schema.t
    - `APP_URL` — the service URL, e.g. `https://trupath-ops.onrender.com`
    - `SEED_OWNER_EMAIL`, `SEED_OWNER_PASSWORD` — the first owner login (only used if no users exist yet)
    - `SHOPIFY_*` — can be left empty until you connect the store (see below)
-4. Each deploy runs `pnpm db:migrate && pnpm db:seed` before switching traffic, so schema changes are applied automatically.
+4. Migrations and the idempotent seed run before the server starts (`npm run start:render`), and also as a pre-deploy step on paid plans, so schema changes are applied automatically.
 5. Open the URL, sign in, change the owner password, add logins for the accounts, factory and dispatch people.
 
 Custom domain: add e.g. `ops.babygambling.in` under the service's Settings → Custom domains and follow the DNS instructions.

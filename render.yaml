@@ -8,7 +8,8 @@ services:
     plan: starter
     buildCommand: (corepack enable && corepack prepare pnpm@10.13.1 --activate) || npm install -g pnpm@10.13.1; pnpm install --frozen-lockfile && pnpm build
     preDeployCommand: npm run db:migrate && npm run db:seed
-    startCommand: npm run start
+    # start:render applies migrations and the idempotent seed before starting, so the schema is always current
+    startCommand: npm run start:render
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
