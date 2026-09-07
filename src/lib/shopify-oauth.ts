@@ -19,8 +19,11 @@ export const SHOPIFY_SCOPES = [
 export const FULFIL_SCOPE = "write_merchant_managed_fulfillment_orders";
 export const INVENTORY_SCOPES = ["write_inventory", "read_locations"] as const;
 
+/** Scopes the store granted. Shopify lists only write_x when both were requested, since write implies read. */
 export function grantedScopes(scope: string | null | undefined): Set<string> {
-  return new Set((scope ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  const set = new Set((scope ?? "").split(",").map((s) => s.trim()).filter(Boolean));
+  for (const s of [...set]) if (s.startsWith("write_")) set.add("read_" + s.slice(6));
+  return set;
 }
 export function hasScope(scope: string | null | undefined, name: string) {
   return grantedScopes(scope).has(name);

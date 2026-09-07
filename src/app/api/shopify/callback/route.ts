@@ -36,17 +36,18 @@ export async function GET(request: NextRequest) {
     } catch (err) {
       webhookNote = err instanceof Error ? err.message : String(err);
     }
+    const reconnect = !!store.tokenEnc;
     await saveStoreToken(store.id, { token, scope, webhooks });
-    await audit(db, { userId: user.id, action: "connect", entityType: "shopify", entityId: shop, summary: `Connected ${store.label} (${shop}; ${scope})${webhookNote ? ` · webhooks: ${webhookNote}` : ""}` });
+    await audit(db, { userId: user.id, action: reconnect ? "reconnect" : "connect", entityType: "shopify", entityId: shop, summary: `${reconnect ? "Updated permissions for" : "Connected"} ${store.label} (${shop}; ${scope})${webhookNote ? ` · webhooks: ${webhookNote}` : ""}` });
     after(async () => {
       try {
-        await syncShopify({ trigger: "install", full: true, sinceDays: 365, storeId: store.id });
+        await syncShopify(reconnect ? { trigger: "reconnect", storeId: store.id } : { trigger: "install", full: true, sinceDays: 365, storeId: store.id });
       } catch (err) {
-        console.error("[shopify install] first sync failed:", err instanceof Error ? err.message : err);
+        console.error("[shopify install] sync after connect failed:", err instanceof Error ? err.message : err);
       }
     });
     for (const p of ["/settings/shopify", "/orders", "/products", "/stock", "/sales", "/"]) revalidatePath(p);
-    const res = NextResponse.redirect(`${base}/settings/shopify?connected=${encodeURIComponent(store.label)}${webhookNote ? `&warn=${encodeURIComponent(webhookNote)}` : ""}`);
+    const res = NextResponse.redirect(`${base}/settings/shopify?${reconnect ? "updated" : "connected"}=${encodeURIComponent(store.label)}${webhookNote ? `&warn=${encodeURIComponent(webhookNote)}` : ""}`);
     res.cookies.delete("shopify_oauth_state");
     return res;
   } catch (err) {

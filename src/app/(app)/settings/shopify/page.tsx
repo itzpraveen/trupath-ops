@@ -27,7 +27,9 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
       ? { tone: "error", text: sp.error }
       : typeof sp.connected === "string"
         ? { tone: "ok", text: `${sp.connected} connected. The first sync of the last 12 months is running in the background.${typeof sp.warn === "string" ? ` Webhooks: ${sp.warn}` : ""}` }
-        : null;
+        : typeof sp.updated === "string"
+          ? { tone: "ok", text: `${sp.updated}: permissions updated.${typeof sp.warn === "string" ? ` Webhooks: ${sp.warn}` : ""}` }
+          : null;
   const opts = { brands: brands.map((b) => ({ id: b.id, name: b.name })), entities: entities.map((e) => ({ id: e.id, name: e.name })), channels: channels.map((c) => c.name) };
 
   return (
