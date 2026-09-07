@@ -229,6 +229,27 @@ await step("factory role sees only factory modules", async () => {
   await p2.screenshot({ path: `${OUT}/18-mobile-materials.png` });
   await c2.close();
 });
+await step("account menu: change password page, dark mode, sign out", async () => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto(`${BASE}/`);
+  await page.getByRole("button", { name: /Owner/ }).first().click();
+  await page.getByRole("menuitem", { name: "Change password" }).waitFor({ timeout: 10000 });
+  await page.getByRole("menuitem", { name: "Change password" }).click();
+  await page.waitForURL(`${BASE}/account`, { timeout: 15000 });
+  await page.getByRole("button", { name: /Owner/ }).first().click();
+  await page.getByRole("menuitem", { name: "Dark mode" }).click();
+  await page.waitForTimeout(300);
+  if (!(await page.locator("html").getAttribute("class"))?.includes("dark")) throw new Error("dark mode did not apply");
+  await page.getByRole("button", { name: /Owner/ }).first().click();
+  await page.getByRole("menuitem", { name: "Light mode" }).click();
+  await page.getByRole("button", { name: /Owner/ }).first().click();
+  await page.getByRole("menuitem", { name: "Sign out" }).click();
+  await page.waitForURL(/\/login/, { timeout: 15000 });
+  await page.getByLabel("Email").fill(OWNER_EMAIL);
+  await page.getByLabel("Password").fill(OWNER_PASSWORD);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL(`${BASE}/`, { timeout: 20000 });
+});
 await step("dark mode + mobile dashboard", async () => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${BASE}/`);
