@@ -6,9 +6,9 @@ services:
     runtime: node
     region: singapore
     plan: starter
-    buildCommand: corepack enable && pnpm install --frozen-lockfile && pnpm build
-    preDeployCommand: pnpm db:migrate && pnpm db:seed
-    startCommand: pnpm start
+    buildCommand: (corepack enable && corepack prepare pnpm@10.13.1 --activate) || npm install -g pnpm@10.13.1; pnpm install --frozen-lockfile && pnpm build
+    preDeployCommand: npm run db:migrate && npm run db:seed
+    startCommand: npm run start
     healthCheckPath: /api/health
     autoDeploy: true
     envVars:
