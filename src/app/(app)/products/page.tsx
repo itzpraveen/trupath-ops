@@ -44,12 +44,13 @@ export default async function ProductsPage(props: PageProps<"/products">) {
   const brandName = Object.fromEntries(brands.map((b) => [b.id, b.name]));
   const params = { brand, q: q || undefined, all: showAll ? "1" : undefined };
   const pages = Math.max(1, Math.ceil(Number(total) / PAGE));
+  const shopifyOn = await isShopifyConfigured();
 
   return (
     <>
       <PageHeader title="Products" description="The catalogue for both brands. Baby Gambling products come from Shopify; add Firstbon and other products by hand.">
         {editable ? <ProductDialog brands={brands} categories={categories} /> : null}
-        {editable && isShopifyConfigured() ? <SyncButton label="Refresh from Shopify" /> : null}
+        {editable && shopifyOn ? <SyncButton label="Refresh from Shopify" /> : null}
       </PageHeader>
       <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap gap-1 rounded-lg bg-muted p-1 text-sm">

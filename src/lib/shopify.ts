@@ -1,5 +1,6 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
+import { loadConnection, WEBHOOK_TOPICS } from "@/lib/shopify-oauth";
 import { desc, eq, isNull, and, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { businessRecords, products, settings, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
@@ -11,53 +12,119 @@ import { toYmd } from "@/lib/dates";
 /* Config & client                                                     */
 /* ------------------------------------------------------------------ */
 
-export function shopifyConfig() {
-  const domain = process.env.SHOPIFY_STORE_DOMAIN?.trim();
-  const token = process.env.SHOPIFY_ADMIN_TOKEN?.trim();
-  const version = process.env.SHOPIFY_API_VERSION?.trim() || "2026-04";
-  return { domain, token, version, configured: !!(domain && token) };
+export type ShopifyAuth = { shop: string; token: string; version: string; source: "env" | "oauth" };
+
+export function shopifyApiVersion() {
+  return process.env.SHOPIFY_API_VERSION?.trim() || "2026-07";
 }
 
-export function isShopifyConfigured() {
-  return shopifyConfig().configured;
+/** Credentials from the environment (manual token) or from the OAuth install stored in the database. */
+export async function getShopifyAuth(): Promise<ShopifyAuth | null> {
+  const version = shopifyApiVersion();
+  const shop = process.env.SHOPIFY_STORE_DOMAIN?.trim().toLowerCase();
+  const token = process.env.SHOPIFY_ADMIN_TOKEN?.trim();
+  if (shop && token) return { shop, token, version, source: "env" };
+  const conn = await loadConnection();
+  if (conn) return { shop: conn.shop, token: conn.token, version, source: "oauth" };
+  return null;
+}
+
+export async function isShopifyConfigured() {
+  return !!(await getShopifyAuth());
+}
+
+/** Everything the settings page needs to explain the current state. */
+export async function shopifyStatus() {
+  const auth = await getShopifyAuth();
+  const conn = auth?.source === "oauth" ? await loadConnection() : null;
+  return {
+    configured: !!auth,
+    source: auth?.source ?? null,
+    shop: auth?.shop ?? process.env.SHOPIFY_STORE_DOMAIN?.trim() ?? null,
+    version: shopifyApiVersion(),
+    scope: conn?.scope ?? null,
+    installedAt: conn?.installedAt ?? null,
+    webhooks: conn?.webhooks ?? [],
+    clientIdSet: !!process.env.SHOPIFY_CLIENT_ID?.trim(),
+    clientSecretSet: !!process.env.SHOPIFY_CLIENT_SECRET?.trim(),
+    webhookSecretSet: !!(process.env.SHOPIFY_WEBHOOK_SECRET?.trim() || process.env.SHOPIFY_CLIENT_SECRET?.trim()),
+    tokenTail: auth?.token ? auth.token.slice(-4) : null,
+  };
 }
 
 type GraphQLResponse<T> = { data?: T; errors?: Array<{ message: string; extensions?: { code?: string } }> };
 
-export async function shopifyGraphQL<T>(query: string, variables: Record<string, unknown> = {}, attempt = 0): Promise<T> {
-  const { domain, token, version, configured } = shopifyConfig();
-  if (!configured) throw new Error("Shopify is not connected. Add SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN.");
-  const res = await fetch(`https://${domain}/admin/api/${version}/graphql.json`, {
+function friendlyShopifyError(messages: string[]) {
+  const text = messages.join("; ");
+  if (/protected customer data/i.test(text)) {
+    return "Shopify blocked customer fields: in the Dev Dashboard open the app → API access → Protected customer data access, request access to customer data plus name, address, email and phone, save, then sync again.";
+  }
+  if (/access denied|not approved|scope/i.test(text)) return `Shopify refused the request (${text}). Check the app's scopes and reinstall from Settings → Shopify.`;
+  return `Shopify error: ${text}`;
+}
+
+export async function shopifyGraphQL<T>(query: string, variables: Record<string, unknown> = {}, attempt = 0, authOverride?: ShopifyAuth): Promise<T> {
+  const auth = authOverride ?? (await getShopifyAuth());
+  if (!auth) throw new Error("Shopify is not connected. Open Settings → Shopify to connect the store.");
+  const res = await fetch(`https://${auth.shop}/admin/api/${auth.version}/graphql.json`, {
     method: "POST",
-    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": token! },
+    headers: { "Content-Type": "application/json", "X-Shopify-Access-Token": auth.token },
     body: JSON.stringify({ query, variables }),
     cache: "no-store",
   });
   if (res.status === 429 && attempt < 4) {
     await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
-    return shopifyGraphQL<T>(query, variables, attempt + 1);
+    return shopifyGraphQL<T>(query, variables, attempt + 1, authOverride);
   }
-  if (res.status === 401 || res.status === 403) throw new Error("Shopify rejected the access token. Check SHOPIFY_ADMIN_TOKEN and the app's scopes.");
+  if (res.status === 401 || res.status === 403) throw new Error("Shopify rejected the access token. Reconnect the store from Settings → Shopify.");
   if (!res.ok) throw new Error(`Shopify returned HTTP ${res.status}`);
   const json = (await res.json()) as GraphQLResponse<T>;
   if (json.errors?.length) {
     if (json.errors.some((e) => e.extensions?.code === "THROTTLED") && attempt < 4) {
       await new Promise((r) => setTimeout(r, 2000 * (attempt + 1)));
-      return shopifyGraphQL<T>(query, variables, attempt + 1);
+      return shopifyGraphQL<T>(query, variables, attempt + 1, authOverride);
     }
-    throw new Error(`Shopify error: ${json.errors.map((e) => e.message).join("; ")}`);
+    throw new Error(friendlyShopifyError(json.errors.map((e) => e.message)));
   }
   if (!json.data) throw new Error("Shopify returned no data");
   return json.data;
 }
 
+/** Webhooks registered by the app are signed with the client secret; ones created in the admin UI use the store's webhook secret. */
 export function verifyShopifyWebhook(rawBody: string, hmacHeader: string | null): boolean {
-  const secret = process.env.SHOPIFY_WEBHOOK_SECRET?.trim();
-  if (!secret || !hmacHeader) return false;
-  const digest = createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
-  const a = Buffer.from(digest);
-  const b = Buffer.from(hmacHeader);
-  return a.length === b.length && timingSafeEqual(a, b);
+  if (!hmacHeader) return false;
+  const secrets = [process.env.SHOPIFY_WEBHOOK_SECRET?.trim(), process.env.SHOPIFY_CLIENT_SECRET?.trim()].filter((s): s is string => !!s);
+  const given = Buffer.from(hmacHeader);
+  return secrets.some((secret) => {
+    const digest = Buffer.from(createHmac("sha256", secret).update(rawBody, "utf8").digest("base64"));
+    return digest.length === given.length && timingSafeEqual(digest, given);
+  });
+}
+
+/** Make sure the store sends us the events we rely on. Returns the topics now subscribed to our URL. */
+export async function registerWebhooks(appUrl: string, auth?: ShopifyAuth): Promise<string[]> {
+  const callback = `${appUrl.replace(/\/$/, "")}/api/webhooks/shopify`;
+  const existing: { webhookSubscriptions: { nodes: Array<{ id: string; topic: string; endpoint: { __typename: string; callbackUrl?: string } }> } } = await shopifyGraphQL(
+    `{ webhookSubscriptions(first: 100) { nodes { id topic endpoint { __typename ... on WebhookHttpEndpoint { callbackUrl } } } } }`,
+    {},
+    0,
+    auth,
+  );
+  const have = new Set(existing.webhookSubscriptions.nodes.filter((n) => n.endpoint?.callbackUrl === callback).map((n) => n.topic));
+  for (const topic of WEBHOOK_TOPICS) {
+    if (have.has(topic)) continue;
+    const r: { webhookSubscriptionCreate: { webhookSubscription: { id: string } | null; userErrors: Array<{ message: string }> } } = await shopifyGraphQL(
+      `mutation Register($topic: WebhookSubscriptionTopic!, $sub: WebhookSubscriptionInput!) {
+        webhookSubscriptionCreate(topic: $topic, webhookSubscription: $sub) { webhookSubscription { id } userErrors { message } }
+      }`,
+      { topic, sub: { uri: callback, format: "JSON" } },
+      0,
+      auth,
+    );
+    if (r.webhookSubscriptionCreate.userErrors.length) throw new Error(`Could not register ${topic}: ${r.webhookSubscriptionCreate.userErrors.map((e) => e.message).join(", ")}`);
+    have.add(topic);
+  }
+  return WEBHOOK_TOPICS.filter((t) => have.has(t));
 }
 
 export const gidToId = (gid: string | null | undefined) => (gid ? gid.split("/").pop() ?? null : null);
@@ -404,7 +471,7 @@ export async function getLastSync() {
 }
 
 export async function syncShopify(opts: { trigger?: string; sinceDays?: number; full?: boolean } = {}) {
-  if (!isShopifyConfigured()) throw new Error("Shopify is not connected. Add SHOPIFY_STORE_DOMAIN and SHOPIFY_ADMIN_TOKEN.");
+  if (!(await isShopifyConfigured())) throw new Error("Shopify is not connected. Open Settings → Shopify to connect the store.");
   if (running.current) return { skipped: true as const };
   running.current = true;
   const [run] = await db.insert(syncRuns).values({ trigger: opts.trigger ?? "manual" }).returning();

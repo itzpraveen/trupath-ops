@@ -41,7 +41,7 @@ const pretty = (s: string) => s.toLowerCase().replace(/_/g, " ");
 export default async function OrdersPage(props: PageProps<"/orders">) {
   const user = await requireUser("orders");
   const sp = await props.searchParams;
-  const configured = isShopifyConfigured();
+  const configured = await isShopifyConfigured();
   const status = pick(sp.status, ["all", "toship", "shipped", "cancelled"], "toship");
   const q = str(sp.q, 80);
   const page = int(sp.page);

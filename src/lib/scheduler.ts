@@ -5,12 +5,14 @@ const g = globalThis as unknown as { __trupathScheduler?: NodeJS.Timeout };
 /** Periodic Shopify sync for long-running hosts (Render web service). Safe to call more than once. */
 export function startScheduler(minutes: number) {
   if (g.__trupathScheduler) return;
-  if (!isShopifyConfigured()) {
-    console.log("[scheduler] Shopify not configured; background sync disabled");
-    return;
-  }
+  let warned = false;
   const run = async (trigger: string) => {
     try {
+      if (!(await isShopifyConfigured())) {
+        if (!warned) console.log("[scheduler] Shopify not connected yet; will retry on the next tick");
+        warned = true;
+        return;
+      }
       const r = await syncShopify({ trigger });
       if (!r.skipped) console.log(`[scheduler] shopify sync ok: ${r.ordersUpserted} orders, ${r.productsUpserted} variants`);
     } catch (err) {

@@ -54,7 +54,7 @@ export default async function DashboardPage(props: PageProps<"/">) {
     ? await Promise.all([factoryOnDate(today), productionInRange(mFrom, mTo), attendanceOnDate(today), lowMaterials(6)])
     : [null, null, null, null];
   const [lows, dispatch] = showStock ? await Promise.all([lowStock(6), dispatchCounts()]) : [null, null];
-  const shopifyOn = isShopifyConfigured();
+  const shopifyOn = await isShopifyConfigured();
   const orders = showOrders && shopifyOn ? await ordersSummary(new Date(`${today}T00:00:00+05:30`), mFrom, mTo) : null;
   const lastSync = showOrders ? await getLastSync() : null;
 

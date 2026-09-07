@@ -10,7 +10,7 @@ import { requireUser } from "@/lib/auth";
 import { formatDateTime } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
-import { shopifyConfig } from "@/lib/shopify";
+import { getShopifyAuth } from "@/lib/shopify";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Amount } from "@/components/app/amount";
 import { PageHeader, Section } from "@/components/app/page-header";
@@ -36,7 +36,7 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
   const byVariant = new Map(matched.map((m) => [m.shopifyVariantId!, m]));
   const editable = canEdit(user.role, "orders") && canEdit(user.role, "dispatch");
   const addr = o.shippingAddress ?? {};
-  const handle = shopifyConfig().domain?.replace(".myshopify.com", "");
+  const handle = (await getShopifyAuth())?.shop.replace(".myshopify.com", "");
   const adminUrl = handle ? `https://admin.shopify.com/store/${handle}/orders/${o.id}` : null;
 
   return (

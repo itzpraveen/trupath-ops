@@ -28,6 +28,7 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
   const [from, to] = period === "fy" ? fyRange(todayIST()) : monthRange(month);
   const label = period === "fy" ? `Financial year ${from.slice(0, 4)}-${to.slice(2, 4)} (to date)` : monthLabel(month);
   const params = { entity, period, month };
+  const shopifyOn = await isShopifyConfigured();
 
   const [totals, byCategory, channels, trend, gst, valuation, production, top] = await Promise.all([
     totalsByKind({ entity, from, to }),
@@ -37,7 +38,7 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
     gstSummary(entity, from, to),
     stockValuation(),
     productionInRange(from, to),
-    isShopifyConfigured() && entity !== "factory" ? topWebsiteProducts(from, to, 10) : Promise.resolve([]),
+    shopifyOn && entity !== "factory" ? topWebsiteProducts(from, to, 10) : Promise.resolve([]),
   ]);
   const net = netOf(totals);
   const netSales = totals.sale.total - totals.return.total;
