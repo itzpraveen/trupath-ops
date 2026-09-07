@@ -6,7 +6,7 @@ import { syncRuns } from "@/db/schema";
 import { formatDate, formatDateTime } from "@/lib/dates";
 import { getBrands, getCategories, getEntities } from "@/lib/queries/common";
 import { listStores, missingScopes, shopifyApiVersion, storeCredentials, storeToken } from "@/lib/shopify-oauth";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { ConfirmAction } from "@/components/app/confirm-action";
 import { InlineAction } from "@/components/app/inline-action";
 import { Section } from "@/components/app/page-header";
@@ -45,7 +45,7 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
             const brand = brands.find((b) => b.id === store.brandId)?.name ?? store.brandId;
             const entity = entities.find((e) => e.id === store.entityId)?.name ?? store.entityId;
             return (
-              <div key={store.id} className="rounded-xl border bg-card p-4 text-sm">
+              <div key={store.id} className="min-w-0 rounded-xl border bg-card p-4 text-sm">
                 <div className="mb-3 flex items-start justify-between gap-2">
                   <div>
                     <p className="text-base font-semibold">{store.label}</p>
@@ -53,7 +53,7 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
                   </div>
                   {connected ? <StatusBadge tone="success">Connected</StatusBadge> : !store.active ? <StatusBadge tone="neutral">Inactive</StatusBadge> : hasCreds ? <StatusBadge tone="warning">Ready to connect</StatusBadge> : <StatusBadge tone="warning">Needs app credentials</StatusBadge>}
                 </div>
-                <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-[9rem_1fr]">
+                <dl className="grid gap-x-4 gap-y-1 sm:grid-cols-[9rem_minmax(0,1fr)] [&>dd]:min-w-0 [&>dd]:break-words">
                   <dt className="text-muted-foreground">Brand · books</dt>
                   <dd>
                     {brand} · {entity}
@@ -65,8 +65,8 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
                   {store.installedAt ? (
                     <>
                       <dt className="text-muted-foreground">Installed</dt>
-                      <dd>
-                        {formatDate(store.installedAt)} · {store.scope || "—"}
+                      <dd className="break-all">
+                        {formatDate(store.installedAt)} · {(store.scope || "—").replace(/,/g, ", ")}
                       </dd>
                       <dt className="text-muted-foreground">Stock from</dt>
                       <dd>{store.baselineAt ? formatDate(store.baselineAt) : "—"} (orders before this never change stock)</dd>
@@ -77,31 +77,25 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
                   {connected ? (
                     <>
                       <dt className="text-muted-foreground">Permissions</dt>
-                      <dd>
-                        {missing.length ? (
-                          <span className="text-warning">
-                            missing {missing.join(", ")} —{" "}
-                            <a href={`/api/shopify/install?store=${store.id}`} className="font-medium text-primary hover:underline">
-                              Update permissions
-                            </a>
-                          </span>
-                        ) : (
-                          "all granted"
-                        )}
-                      </dd>
+                      <dd className="break-all">{missing.length ? <span className="text-warning">missing {missing.join(", ")}. Use the Update permissions button below.</span> : "all granted"}</dd>
                       <dt className="text-muted-foreground">Website stock</dt>
                       <dd>{store.pushInventory ? "kept in sync from this app" : "not pushed (turn on in Edit store after counting stock)"}</dd>
                     </>
                   ) : null}
                 </dl>
                 <div className="mt-4 flex flex-wrap gap-2">
+                  {connected && missing.length ? (
+                    <a href={`/api/shopify/install?store=${store.id}`} className={buttonVariants({ size: "sm" })}>
+                      Update permissions
+                    </a>
+                  ) : null}
                   <StoreDialog store={store} hasOwnSecret={!!store.clientSecretEnc} {...opts} />
                   {connected ? (
                     <>
                       <InlineAction action={testShopify} hidden={{ storeId: store.id }} variant="outline" size="sm">
                         Test
                       </InlineAction>
-                      <SyncButton label="Sync recent" storeId={store.id} variant="default" />
+                      <SyncButton label="Sync recent" storeId={store.id} variant={missing.length ? "outline" : "default"} />
                       <SyncButton label="Full sync (12 months)" storeId={store.id} full />
                       <InlineAction action={registerShopifyWebhooks} hidden={{ storeId: store.id }} variant="outline" size="sm">
                         Register webhooks
