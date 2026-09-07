@@ -72,6 +72,7 @@ See `.env.example`. `DATABASE_URL` and `APP_URL` are required. `DATABASE_SSL=req
 - Money is stored as integer paise; quantities of raw material keep three decimals.
 - `entities` are the two sets of books (`brand`, `factory`). Ledger entries, payments, bank accounts, dispatches and job work carry an `entity_id`.
 - Stock and material balances only change through `adjustStock` / `adjustMaterial`, which lock the row and write a movement, so history always explains the balance.
+- Website orders placed before the store was connected (the "stock baseline") never change finished stock; `npm run stock:undo-import` repairs stock if such orders were deducted before this rule existed.
 - Synced records carry a `source_ref` (e.g. `shopify:order:123:sale`) that makes repeated syncs idempotent.
 - Photos are stored in Postgres (`uploads`), resized in the browser first. Move to S3/R2 if volumes grow.
 

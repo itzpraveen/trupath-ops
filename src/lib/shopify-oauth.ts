@@ -108,3 +108,29 @@ export async function exchangeCodeForToken(shop: string, code: string): Promise<
   if (!res.ok || !json.access_token) throw new Error(`Shopify did not issue a token: ${json.error_description ?? json.error ?? `HTTP ${res.status}`}`);
   return { token: json.access_token, scope: json.scope ?? "" };
 }
+
+/* ------------------------------------------------------------------ */
+/* Stock baseline: orders placed before this moment never change stock */
+/* ------------------------------------------------------------------ */
+const BASELINE_KEY = "shopify.stockBaselineAt";
+let baselineCache: { at: number; value: Date | null } | null = null;
+
+export async function getStockBaseline(): Promise<Date | null> {
+  if (baselineCache && Date.now() - baselineCache.at < 30_000) return baselineCache.value;
+  const [row] = await db.select().from(settings).where(eq(settings.key, BASELINE_KEY)).limit(1);
+  const value = row && typeof row.value === "string" ? new Date(row.value) : null;
+  baselineCache = { at: Date.now(), value: value && !Number.isNaN(value.getTime()) ? value : null };
+  return baselineCache.value;
+}
+
+/** Set the baseline once (first connection or first sync); later calls keep the earlier date. */
+export async function ensureStockBaseline(candidate = new Date()): Promise<Date> {
+  const existing = await getStockBaseline();
+  if (existing) return existing;
+  const conn = await loadConnection();
+  const installedAt = conn?.installedAt ? new Date(conn.installedAt) : null;
+  const value = installedAt && !Number.isNaN(installedAt.getTime()) ? installedAt : candidate;
+  await db.insert(settings).values({ key: BASELINE_KEY, value: value.toISOString() }).onConflictDoNothing();
+  baselineCache = null;
+  return (await getStockBaseline()) ?? candidate;
+}

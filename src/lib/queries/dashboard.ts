@@ -131,7 +131,7 @@ export async function ordersSummary(todayFrom: Date, monthFrom: string, monthTo:
   const [open] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(shopifyOrders)
-    .where(and(isNull(shopifyOrders.cancelledAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`));
+    .where(and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`));
   const [month] = await db
     .select({ n: sql<number>`count(*)::int`, total: sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` })
     .from(shopifyOrders)

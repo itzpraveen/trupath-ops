@@ -65,7 +65,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
   }
 
   const where = and(
-    status === "toship" ? and(isNull(shopifyOrders.cancelledAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`) : status === "shipped" ? sql`${shopifyOrders.fulfillmentStatus} = 'FULFILLED'` : status === "cancelled" ? isNotNull(shopifyOrders.cancelledAt) : undefined,
+    status === "toship" ? and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`) : status === "shipped" ? sql`${shopifyOrders.fulfillmentStatus} = 'FULFILLED'` : status === "cancelled" ? isNotNull(shopifyOrders.cancelledAt) : undefined,
     q ? or(ilike(shopifyOrders.name, `%${q}%`), ilike(shopifyOrders.customerName, `%${q}%`), ilike(shopifyOrders.phone, `%${q}%`), ilike(shopifyOrders.email, `%${q}%`), ilike(shopifyOrders.city, `%${q}%`)) : undefined,
   );
   const month = monthKey();
@@ -129,7 +129,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
           </TableHeader>
           <TableBody>
             {rows.length === 0 ? (
-              <TableEmpty colSpan={7}>{status === "toship" ? "Nothing waiting to ship." : "No orders match."}{sync.lastOk ? "" : " Run a sync to pull orders from Shopify."}</TableEmpty>
+              <TableEmpty colSpan={7}>{status === "toship" ? "Nothing waiting to ship. Archived orders in Shopify count as done." : "No orders match."}{sync.lastOk ? "" : " Run a sync to pull orders from Shopify."}</TableEmpty>
             ) : (
               rows.map((o) => (
                 <TableRow key={o.id} className={cn(o.cancelledAt && "opacity-60")}>

@@ -5,7 +5,7 @@ import { db } from "@/db";
 import { audit } from "@/lib/audit";
 import { getCurrentUser } from "@/lib/auth";
 import { registerWebhooks, shopifyApiVersion, syncShopify } from "@/lib/shopify";
-import { exchangeCodeForToken, isValidShop, saveConnection, verifyOAuthHmac } from "@/lib/shopify-oauth";
+import { ensureStockBaseline, exchangeCodeForToken, isValidShop, saveConnection, verifyOAuthHmac } from "@/lib/shopify-oauth";
 
 export async function GET(request: NextRequest) {
   const base = (process.env.APP_URL?.trim() || request.nextUrl.origin).replace(/\/$/, "");
@@ -33,7 +33,9 @@ export async function GET(request: NextRequest) {
     } catch (err) {
       webhookNote = err instanceof Error ? err.message : String(err);
     }
-    await saveConnection({ shop, token, scope, installedAt: new Date().toISOString(), webhooks });
+    const installedAt = new Date();
+    await saveConnection({ shop, token, scope, installedAt: installedAt.toISOString(), webhooks });
+    await ensureStockBaseline(installedAt);
     await audit(db, { userId: user.id, action: "connect", entityType: "shopify", entityId: shop, summary: `Connected Shopify store ${shop} (${scope})${webhookNote ? ` · webhooks: ${webhookNote}` : ""}` });
     after(async () => {
       try {

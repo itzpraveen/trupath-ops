@@ -1,6 +1,6 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { loadConnection, WEBHOOK_TOPICS } from "@/lib/shopify-oauth";
+import { ensureStockBaseline, getStockBaseline, loadConnection, WEBHOOK_TOPICS } from "@/lib/shopify-oauth";
 import { desc, eq, isNull, and, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { businessRecords, products, settings, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
@@ -434,8 +434,12 @@ export async function upsertOrderFromShopify(node: OrderNode) {
     }
 
     // Finished stock: deduct once when fulfilled, put back once when cancelled/restocked.
-    const fulfilled = node.displayFulfillmentStatus === "FULFILLED";
-    const restocked = node.displayFulfillmentStatus === "RESTOCKED" || cancelled;
+    // Orders placed before the stock baseline (when the store was connected) never touch stock,
+    // because the quantities on hand at that time were not in the system.
+    const baseline = await getStockBaseline();
+    const touchesStock = !baseline || new Date(node.createdAt) >= baseline;
+    const fulfilled = touchesStock && node.displayFulfillmentStatus === "FULFILLED";
+    const restocked = touchesStock && (node.displayFulfillmentStatus === "RESTOCKED" || cancelled);
     const stockDeducted = existing?.stockDeducted ?? false;
     const stockRestored = existing?.stockRestored ?? false;
     if (fulfilled && !stockDeducted) {
@@ -474,6 +478,7 @@ export async function syncShopify(opts: { trigger?: string; sinceDays?: number; 
   if (!(await isShopifyConfigured())) throw new Error("Shopify is not connected. Open Settings → Shopify to connect the store.");
   if (running.current) return { skipped: true as const };
   running.current = true;
+  await ensureStockBaseline();
   const [run] = await db.insert(syncRuns).values({ trigger: opts.trigger ?? "manual" }).returning();
   let ordersUpserted = 0;
   let productsUpserted = 0;
@@ -530,6 +535,6 @@ export async function countOrdersNeedingAttention() {
   const [row] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(shopifyOrders)
-    .where(and(isNull(shopifyOrders.cancelledAt), sql`${shopifyOrders.fulfillmentStatus} <> 'FULFILLED'`));
+    .where(and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} <> 'FULFILLED'`));
   return row?.n ?? 0;
 }
