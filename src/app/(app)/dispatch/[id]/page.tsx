@@ -9,7 +9,7 @@ import { FULFIL_SCOPE, getStoreByShop, hasScope } from "@/lib/shopify-oauth";
 import { requireUser } from "@/lib/auth";
 import { formatDate, formatDateTime, todayIST } from "@/lib/dates";
 import { canEdit } from "@/lib/permissions";
-import { getBrands, getCategories, getContacts, getProductOptions } from "@/lib/queries/common";
+import { getBrands, getCategories, getContacts, getEntities, getProductOptions } from "@/lib/queries/common";
 import { buttonVariants } from "@/components/ui/button";
 import { Amount } from "@/components/app/amount";
 import { PageHeader, Section } from "@/components/app/page-header";
@@ -45,11 +45,11 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
   const pcs = items.reduce((s, r) => s + r.it.qty, 0);
 
   if (editing) {
-    const [productOptions, channels, customers] = await Promise.all([getProductOptions(), getCategories("channel"), getContacts("customer")]);
+    const [productOptions, channels, customers, entities] = await Promise.all([getProductOptions(), getCategories("channel"), getContacts("customer"), getEntities()]);
     return (
       <>
         <PageHeader title={`Edit ${d.number}`} backHref={`/dispatch/${id}`} backLabel="Back to dispatch" />
-        <DispatchForm products={productOptions} brands={brands} channels={channels.map((c) => c.name)} customers={customers.map((c) => ({ id: c.id, name: c.name }))} date={todayIST()} initial={{ ...d, items: items.map((r) => ({ productId: r.it.productId, qty: r.it.qty })) }} itemsLocked={d.stockDeducted} />
+        <DispatchForm products={productOptions} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers.map((c) => ({ id: c.id, name: c.name }))} date={todayIST()} initial={{ ...d, items: items.map((r) => ({ productId: r.it.productId, qty: r.it.qty })) }} itemsLocked={d.stockDeducted} />
       </>
     );
   }

@@ -10,13 +10,14 @@ import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zDate, zEnum, zMoney, zOptional, zOptionalMoney, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
 import { formatINR } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
+import { entityExists } from "@/lib/queries/common";
 
 function revalidateMoney() {
   for (const p of ["/payments", "/sales", "/contacts", "/reports", "/"]) revalidatePath(p);
 }
 
 const paymentSchema = z.object({
-  entityId: zEnum(["brand", "factory"], "books"),
+  entityId: zRequired("Books", 40),
   direction: zEnum(["in", "out"], "direction"),
   workDate: zDate,
   amountP: zMoney("Amount"),
@@ -34,6 +35,7 @@ export async function createPayment(_prev: ActionState, formData: FormData): Pro
     const parsed = parseForm(paymentSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
+    if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     const id = await db.transaction(async (tx) => {
       const number = await nextNumber(tx, d.direction === "in" ? "receipt" : "payment", d.workDate);
       const [row] = await tx
@@ -71,7 +73,7 @@ export async function voidPayment(_prev: ActionState, formData: FormData): Promi
 
 const accountSchema = z.object({
   id: zOptionalUuid,
-  entityId: zEnum(["brand", "factory"], "books"),
+  entityId: zRequired("Books", 40),
   name: zRequired("Name", 80),
   type: zEnum(["cash", "bank", "upi", "wallet"], "type"),
   openingP: zOptionalMoney,
@@ -84,6 +86,7 @@ export async function saveBankAccount(_prev: ActionState, formData: FormData): P
     const parsed = parseForm(accountSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
+    if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     if (d.id) await db.update(bankAccounts).set({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP, active: d.active }).where(eq(bankAccounts.id, d.id));
     else await db.insert(bankAccounts).values({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP });
     await audit(db, { userId: user.id, action: d.id ? "update" : "create", entityType: "bank_account", entityId: d.id ?? null, summary: `${d.id ? "Updated" : "Added"} account ${d.name}` });

@@ -22,7 +22,8 @@ const BRAND: Record<string, string> = { babygambling: "Baby Gambling", firstbon:
 export default async function DashboardPage(props: PageProps<"/">) {
   const user = await requireUser("dashboard");
   const sp = await props.searchParams;
-  const entity = typeof sp.entity === "string" && ["brand", "factory", "all"].includes(sp.entity) ? sp.entity : "all";
+  const entityRows = await getEntities();
+  const entity = typeof sp.entity === "string" && ["all", ...entityRows.map((e) => e.id)].includes(sp.entity) ? sp.entity : "all";
   const today = todayIST();
   const month = monthKey(today);
   const [mFrom, mTo] = monthRange(month);
@@ -62,11 +63,11 @@ export default async function DashboardPage(props: PageProps<"/">) {
 
   return (
     <>
-      <PageHeader title={`Good ${greeting()}, ${user.name.split(" ")[0]}`} description={`${formatDate(today, "EEEE, d MMMM yyyy")}${entity !== "all" ? ` · ${entity === "brand" ? "Trupaths Ventures books" : "Factory books"}` : ""}`}>
+      <PageHeader title={`Good ${greeting()}, ${user.name.split(" ")[0]}`} description={`${formatDate(today, "EEEE, d MMMM yyyy")}${entity !== "all" ? ` · ${entityRows.find((e) => e.id === entity)?.name ?? entity} books` : ""}`}>
         {showMoney && entities && channelsList && expenseCats && contacts && banks ? (
           <AddRecordButtons
             kinds={["sale", "expense"]}
-            defaultEntity={entity === "factory" ? "factory" : "brand"}
+            defaultEntity={entity === "all" ? "brand" : entity}
             defaultDate={today}
             options={{
               entities: entities.map((e) => ({ id: e.id, name: e.name })),
@@ -81,11 +82,7 @@ export default async function DashboardPage(props: PageProps<"/">) {
 
       {showMoney ? (
         <div className="mb-5 flex flex-wrap items-center gap-1 text-sm">
-          {[
-            ["all", "All books"],
-            ["brand", "Trupaths Ventures"],
-            ["factory", "Factory"],
-          ].map(([v, l]) => (
+          {[["all", "All books"], ...entityRows.map((e) => [e.id, e.name] as [string, string])].map(([v, l]) => (
             <Link key={v} href={v === "all" ? "/" : `/?entity=${v}`} className={cn("rounded-full px-3 py-1", entity === v ? "bg-foreground text-background" : "bg-card text-muted-foreground hover:text-foreground border")}>
               {l}
             </Link>

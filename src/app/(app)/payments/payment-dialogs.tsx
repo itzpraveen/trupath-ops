@@ -3,7 +3,7 @@
 import { createPayment, saveBankAccount } from "@/actions/payments";
 import type { BankAccount } from "@/db/schema";
 import { toRupees } from "@/lib/money";
-import { PAYMENT_METHODS } from "@/lib/constants";
+import { ENTITY_LABEL, PAYMENT_METHODS } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -11,7 +11,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Field, FormRow } from "@/components/app/field";
 import { FormDialog } from "@/components/app/form-dialog";
 
-export function PaymentDialog({ direction, contacts, accounts, date, defaultEntity, defaultContactId, trigger, triggerLabel }: { direction: "in" | "out"; contacts: { id: string; name: string; type: string }[]; accounts: { id: string; name: string; entityId: string }[]; date: string; defaultEntity: string; defaultContactId?: string; trigger?: React.ReactElement; triggerLabel?: React.ReactNode }) {
+export function PaymentDialog({ direction, contacts, accounts, entities, date, defaultEntity, defaultContactId, trigger, triggerLabel }: { direction: "in" | "out"; contacts: { id: string; name: string; type: string }[]; accounts: { id: string; name: string; entityId: string }[]; entities: { id: string; name: string }[]; date: string; defaultEntity: string; defaultContactId?: string; trigger?: React.ReactElement; triggerLabel?: React.ReactNode }) {
   const isIn = direction === "in";
   const list = contacts.filter((c) => (isIn ? c.type === "customer" : c.type !== "customer"));
   return (
@@ -24,8 +24,11 @@ export function PaymentDialog({ direction, contacts, accounts, date, defaultEnti
             <FormRow>
               <Field label="Books" name="entityId" error={fe.entityId}>
                 <NativeSelect id="entityId" name="entityId" defaultValue={defaultEntity}>
-                  <option value="brand">Trupaths Ventures</option>
-                  <option value="factory">Factory</option>
+                  {entities.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
                 </NativeSelect>
               </Field>
               <Field label="Date" name="workDate" error={fe.workDate} required>
@@ -62,7 +65,7 @@ export function PaymentDialog({ direction, contacts, accounts, date, defaultEnti
                   <option value="">Not specified</option>
                   {accounts.map((a) => (
                     <option key={a.id} value={a.id}>
-                      {a.name} ({a.entityId === "factory" ? "Factory" : "Trupaths"})
+                      {a.name} ({ENTITY_LABEL[a.entityId] ?? a.entityId})
                     </option>
                   ))}
                 </NativeSelect>
@@ -81,7 +84,7 @@ export function PaymentDialog({ direction, contacts, accounts, date, defaultEnti
   );
 }
 
-export function BankAccountDialog({ account }: { account?: BankAccount }) {
+export function BankAccountDialog({ account, entities }: { account?: BankAccount; entities: { id: string; name: string }[] }) {
   return (
     <FormDialog trigger={account ? <Button variant="ghost" size="xs" /> : <Button variant="outline" size="sm" />} triggerLabel={account ? "Edit" : "Add account"} title={account ? `Edit ${account.name}` : "Add cash or bank account"} action={saveBankAccount} submitLabel="Save">
       {(state) => {
@@ -92,8 +95,11 @@ export function BankAccountDialog({ account }: { account?: BankAccount }) {
             <FormRow>
               <Field label="Books" name="entityId" error={fe.entityId}>
                 <NativeSelect id="entityId" name="entityId" defaultValue={account?.entityId ?? "brand"}>
-                  <option value="brand">Trupaths Ventures</option>
-                  <option value="factory">Factory</option>
+                  {entities.map((e) => (
+                    <option key={e.id} value={e.id}>
+                      {e.name}
+                    </option>
+                  ))}
                 </NativeSelect>
               </Field>
               <Field label="Type" name="type" error={fe.type}>

@@ -10,6 +10,7 @@ import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zDate, zEnum, zMoney, zOptional, zOptionalMoney, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
 import { formatINR } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
+import { entityExists } from "@/lib/queries/common";
 
 const KINDS = ["sale", "expense", "return", "purchase"] as const;
 const METHODS = ["cash", "upi", "bank", "card", "cod", "gateway", "credit", "other"] as const;
@@ -17,7 +18,7 @@ const KIND_LABEL: Record<RecordKind, string> = { sale: "Sale", expense: "Expense
 
 const recordSchema = z.object({
   kind: zEnum(KINDS, "type"),
-  entityId: zEnum(["brand", "factory"], "books"),
+  entityId: zRequired("Books", 40),
   workDate: zDate,
   amountP: zMoney("Amount"),
   channel: zOptional(100),
@@ -44,6 +45,7 @@ export async function createRecord(_prev: ActionState, formData: FormData): Prom
     const parsed = parseForm(recordSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
+    if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     const id = await db.transaction(async (tx) => {
       const number = await nextNumber(tx, d.kind, d.workDate);
       const [row] = await tx

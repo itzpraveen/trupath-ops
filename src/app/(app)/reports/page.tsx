@@ -10,6 +10,7 @@ import { netOf, totalsByKind } from "@/lib/queries/records";
 import { gstSummary, monthlyTrend, stockValuation, topWebsiteProducts } from "@/lib/queries/reports";
 import { isShopifyConfigured } from "@/lib/shopify";
 import { pick, qs } from "@/lib/url";
+import { getEntities } from "@/lib/queries/common";
 import { buttonVariants } from "@/components/ui/button";
 import { Amount } from "@/components/app/amount";
 import { MonthNav } from "@/components/app/month-nav";
@@ -22,7 +23,8 @@ export const metadata: Metadata = { title: "Reports" };
 export default async function ReportsPage(props: PageProps<"/reports">) {
   await requireUser("reports");
   const sp = await props.searchParams;
-  const entity = pick(sp.entity, ["all", "brand", "factory"], "all");
+  const entityRows = await getEntities();
+  const entity = pick(sp.entity, ["all", ...entityRows.map((e) => e.id)], "all");
   const period = pick(sp.period, ["month", "fy"], "month");
   const month = /^\d{4}-\d{2}$/.test(String(sp.month ?? "")) ? String(sp.month) : monthKey();
   const [from, to] = period === "fy" ? fyRange(todayIST()) : monthRange(month);
@@ -46,7 +48,7 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
 
   return (
     <>
-      <PageHeader title="Reports" description={`${label} · ${entity === "all" ? "all books" : entity === "brand" ? "Trupaths Ventures" : "Factory"}`}>
+      <PageHeader title="Reports" description={`${label} · ${entity === "all" ? "all books" : entityRows.find((e) => e.id === entity)?.name ?? entity}`}>
         <Link href={`/api/export/records${qs({ entity, month })}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Download /> Ledger CSV
         </Link>
@@ -54,11 +56,7 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
       <div className="mb-5 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex gap-1 text-sm">
-            {[
-              ["all", "All books"],
-              ["brand", "Trupaths Ventures"],
-              ["factory", "Factory"],
-            ].map(([v, l]) => (
+            {[["all", "All books"], ...entityRows.map((e) => [e.id, e.name] as [string, string])].map(([v, l]) => (
               <Link key={v} href={`/reports${qs({ ...params, entity: v })}`} className={cn("rounded-full px-3 py-1", entity === v ? "bg-foreground text-background" : "border bg-card text-muted-foreground hover:text-foreground")}>
                 {l}
               </Link>

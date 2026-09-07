@@ -14,6 +14,7 @@ import { formatINR } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
 import { adjustStock } from "@/lib/stock";
 import { queueStockPush } from "@/lib/stock-push";
+import { entityExists } from "@/lib/queries/common";
 import { fulfillShopifyOrder } from "@/lib/shopify-writeback";
 
 function revalidateDispatch(id?: string) {
@@ -23,7 +24,7 @@ function revalidateDispatch(id?: string) {
 
 const headerSchema = z.object({
   brandId: zRequired("Brand", 40),
-  entityId: zEnum(["brand", "factory"], "books"),
+  entityId: zRequired("Books", 40),
   customerName: zRequired("Customer name", 150),
   phone: zOptional(30),
   address: zOptional(1000),
@@ -58,6 +59,7 @@ export async function createDispatch(_prev: ActionState, formData: FormData): Pr
     const parsed = parseForm(createSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
+    if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     const lines = parseLines(d.productId, d.qty);
     if (!lines.length) return { error: "Add at least one product with a quantity" };
     const id = await db.transaction(async (tx) => {
@@ -122,6 +124,7 @@ export async function updateDispatch(_prev: ActionState, formData: FormData): Pr
     const parsed = parseForm(updateSchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
+    if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     await db.transaction(async (tx) => {
       const [existing] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id)).for("update");
       if (!existing) throw new Error("Dispatch not found");

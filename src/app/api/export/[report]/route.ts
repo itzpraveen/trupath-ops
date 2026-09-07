@@ -24,7 +24,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
 
   if (report === "records") {
     const { rows } = await listRecords({
-      entity: pick(sp.get("entity"), ["all", "brand", "factory"], "all"),
+      entity: str(sp.get("entity")) || "all",
       kind: pick(sp.get("kind"), ["all", "sale", "expense", "return", "purchase"], "all"),
       from,
       to,

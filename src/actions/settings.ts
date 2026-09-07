@@ -8,9 +8,10 @@ import { brands, categories, entities, sessions, users, ROLES, type CategoryKind
 import { audit } from "@/lib/audit";
 import { getCurrentUser, hashPassword, requireEditor, verifyPassword, AuthError } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zEnum, zOptional, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
+import { entityExists } from "@/lib/queries/common";
 
 const entitySchema = z.object({
-  id: zEnum(["brand", "factory"], "books"),
+  id: zRequired("Books", 40),
   name: zRequired("Name", 100),
   legalName: zOptional(150),
   gstin: zOptional(20),
@@ -26,6 +27,7 @@ export async function saveEntity(_prev: ActionState, formData: FormData): Promis
     const parsed = parseForm(entitySchema, formData);
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
+    if (!(await entityExists(d.id))) return { error: "Unknown books" };
     await db.update(entities).set({ name: d.name, legalName: d.legalName ?? null, gstin: d.gstin?.toUpperCase() ?? null, address: d.address ?? null, stateCode: d.stateCode ?? null, phone: d.phone ?? null, email: d.email ?? null }).where(eq(entities.id, d.id));
     await audit(db, { userId: user.id, action: "update", entityType: "entity", entityId: d.id, summary: `Updated company details for ${d.name}` });
     revalidatePath("/settings");

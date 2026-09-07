@@ -19,6 +19,7 @@ type Line = { key: number; productId: string; qty: string };
 export function DispatchForm({
   products,
   brands,
+  entities,
   channels,
   customers,
   date,
@@ -27,6 +28,7 @@ export function DispatchForm({
 }: {
   products: ProductOption[];
   brands: { id: string; name: string }[];
+  entities: { id: string; name: string }[];
   channels: string[];
   customers: { id: string; name: string }[];
   date: string;
@@ -127,8 +129,11 @@ export function DispatchForm({
                     </Field>
                     <Field label="Books" name="entityId" error={fe.entityId}>
                       <NativeSelect id="entityId" name="entityId" defaultValue={initial?.entityId ?? "brand"}>
-                        <option value="brand">Trupaths Ventures</option>
-                        <option value="factory">Factory</option>
+                        {entities.map((e) => (
+                          <option key={e.id} value={e.id}>
+                            {e.name}
+                          </option>
+                        ))}
                       </NativeSelect>
                     </Field>
                   </FormRow>

@@ -6,6 +6,12 @@ import { bankAccounts, brands, categories, contacts, employees, entities, materi
 
 export const getBrands = cache(() => db.select().from(brands).where(eq(brands.active, true)).orderBy(asc(brands.sortOrder), asc(brands.name)));
 export const getEntities = cache(() => db.select().from(entities).orderBy(asc(entities.sortOrder)));
+export async function entityExists(id: string) {
+  return (await getEntities()).some((e) => e.id === id);
+}
+export async function entityName(id: string) {
+  return (await getEntities()).find((e) => e.id === id)?.name ?? id;
+}
 export const getCategories = cache((kind: CategoryKind) =>
   db
     .select()

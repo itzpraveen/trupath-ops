@@ -9,7 +9,7 @@ import { requireUser } from "@/lib/auth";
 import { formatDate, monthKey, monthRange, todayIST } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
-import { getContacts, PAYMENT_METHOD_LABEL } from "@/lib/queries/common";
+import { getContacts, getEntities, PAYMENT_METHOD_LABEL } from "@/lib/queries/common";
 import { accountBalances, outstandingLists } from "@/lib/queries/money";
 import { pick, qs } from "@/lib/url";
 import { Button } from "@/components/ui/button";
@@ -28,7 +28,10 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
   const user = await requireUser("payments");
   const sp = await props.searchParams;
   const tab = pick(sp.tab, ["payments", "accounts", "receivables", "payables"], "payments");
-  const entity = pick(sp.entity, ["all", "brand", "factory"], "all");
+  const entityRows = await getEntities();
+  const entity = pick(sp.entity, ["all", ...entityRows.map((e) => e.id)], "all");
+  const entityOptions = entityRows.map((e) => ({ id: e.id, name: e.name }));
+  const nameOf = (id: string) => entityRows.find((e) => e.id === id)?.name ?? id;
   const month = /^\d{4}-\d{2}$/.test(String(sp.month ?? "")) ? String(sp.month) : monthKey();
   const [from, to] = monthRange(month);
   const editable = canEdit(user.role, "payments");
@@ -61,8 +64,8 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
       <PageHeader title="Payments" description="Money received from customers, money paid to suppliers, and where it sits.">
         {editable ? (
           <>
-            <PaymentDialog direction="in" contacts={contactOptions} accounts={accountOptions} date={today} defaultEntity={entity === "factory" ? "factory" : "brand"} />
-            <PaymentDialog direction="out" contacts={contactOptions} accounts={accountOptions} date={today} defaultEntity={entity === "factory" ? "factory" : "brand"} />
+            <PaymentDialog direction="in" contacts={contactOptions} accounts={accountOptions} entities={entityOptions} date={today} defaultEntity={entity === "all" ? "brand" : entity} />
+            <PaymentDialog direction="out" contacts={contactOptions} accounts={accountOptions} entities={entityOptions} date={today} defaultEntity={entity === "all" ? "brand" : entity} />
           </>
         ) : null}
       </PageHeader>
@@ -88,11 +91,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
         {tab === "payments" ? (
           <div className="flex flex-wrap items-center gap-3">
             <div className="flex gap-1 text-sm">
-              {[
-                ["all", "All books"],
-                ["brand", "Trupaths"],
-                ["factory", "Factory"],
-              ].map(([v, l]) => (
+              {[["all", "All books"], ...entityRows.map((e) => [e.id, e.name] as [string, string])].map(([v, l]) => (
                 <Link key={v} href={`/payments${qs({ ...params, entity: v })}`} className={cn("rounded-full px-3 py-1", entity === v ? "bg-foreground text-background" : "border bg-card text-muted-foreground")}>
                   {l}
                 </Link>
@@ -129,7 +128,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
                     <TableCell>
                       <span className={cn(p.voidedAt && "line-through")}>{contactName ?? (p.direction === "in" ? "Receipt" : "Payment")}</span>
                       <span className="block text-xs text-muted-foreground">
-                        {p.entityId === "factory" ? "Factory" : "Trupaths"}
+                        {nameOf(p.entityId)}
                         {p.note ? ` · ${p.note}` : ""}
                         {p.voidedAt ? ` · voided: ${p.voidReason}` : ""}
                       </span>
@@ -161,7 +160,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
         <>
           {editable ? (
             <div className="mb-3">
-              <BankAccountDialog />
+              <BankAccountDialog entities={entityOptions} />
             </div>
           ) : null}
           <TableCard>
@@ -180,7 +179,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
                 {balances.map((b) => (
                   <TableRow key={b.id} className={cn(!b.active && "opacity-60")}>
                     <TableCell className="font-medium">{b.name}</TableCell>
-                    <TableCell>{b.entityId === "factory" ? "Factory" : "Trupaths Ventures"}</TableCell>
+                    <TableCell>{nameOf(b.entityId)}</TableCell>
                     <TableCell>{TYPE_LABEL[b.type] ?? b.type}</TableCell>
                     <TableCell className="tabular hidden text-right sm:table-cell">{formatINR(b.openingP)}</TableCell>
                     <TableCell className="text-right">
@@ -188,7 +187,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
                     </TableCell>
                     {editable ? (
                       <TableCell className="text-right">
-                        <BankAccountDialog account={b} />
+                        <BankAccountDialog account={b} entities={entityOptions} />
                       </TableCell>
                     ) : null}
                   </TableRow>
@@ -224,7 +223,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
                     </TableCell>
                     {editable ? (
                       <TableCell className="text-right">
-                        <PaymentDialog direction={tab === "receivables" ? "in" : "out"} contacts={contactOptions} accounts={accountOptions} date={today} defaultEntity="brand" defaultContactId={c.id} trigger={<Button variant="outline" size="xs" />} triggerLabel={tab === "receivables" ? "Record receipt" : "Record payment"} />
+                        <PaymentDialog direction={tab === "receivables" ? "in" : "out"} contacts={contactOptions} accounts={accountOptions} entities={entityOptions} date={today} defaultEntity="brand" defaultContactId={c.id} trigger={<Button variant="outline" size="xs" />} triggerLabel={tab === "receivables" ? "Record receipt" : "Record payment"} />
                       </TableCell>
                     ) : null}
                   </TableRow>

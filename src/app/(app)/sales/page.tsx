@@ -28,7 +28,8 @@ const KIND_TONE = { sale: "success", expense: "destructive", return: "warning", 
 export default async function SalesPage(props: PageProps<"/sales">) {
   const user = await requireUser("sales");
   const sp = await props.searchParams;
-  const entity = pick(sp.entity, ["all", "brand", "factory"], "all");
+  const entityRows = await getEntities();
+  const entity = pick(sp.entity, ["all", ...entityRows.map((e) => e.id)], "all");
   const kind = pick(sp.kind, ["all", "sale", "expense", "return", "purchase"], "all");
   const month = /^\d{4}-\d{2}$/.test(String(sp.month ?? "")) ? String(sp.month) : monthKey();
   const q = str(sp.q, 100);
@@ -59,7 +60,7 @@ export default async function SalesPage(props: PageProps<"/sales">) {
   return (
     <>
       <PageHeader title="Sales & expenses" description="Every rupee in and out, for the brand and the factory separately.">
-        {editable ? <AddRecordButtons options={options} defaultEntity={entity === "factory" ? "factory" : "brand"} defaultDate={todayIST()} /> : null}
+        {editable ? <AddRecordButtons options={options} defaultEntity={entity === "all" ? "brand" : entity} defaultDate={todayIST()} /> : null}
         <Link href={`/api/export/records${qs(params)}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Download /> Export CSV
         </Link>
@@ -67,11 +68,7 @@ export default async function SalesPage(props: PageProps<"/sales">) {
 
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
         <div className="flex flex-wrap items-center gap-1 text-sm">
-          {[
-            ["all", "All books"],
-            ["brand", "Trupaths Ventures"],
-            ["factory", "Factory"],
-          ].map(([v, l]) => (
+          {[["all", "All books"], ...entityRows.map((e) => [e.id, e.name] as [string, string])].map(([v, l]) => (
             <Link key={v} href={`/sales${qs({ ...params, entity: v, page: undefined })}`} className={cn("rounded-full px-3 py-1", entity === v ? "bg-foreground text-background" : "border bg-card text-muted-foreground hover:text-foreground")}>
               {l}
             </Link>

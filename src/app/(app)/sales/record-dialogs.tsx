@@ -5,7 +5,7 @@ import { createRecord, updateRecord } from "@/actions/records";
 import type { BusinessRecord, RecordKind } from "@/db/schema";
 import type { ActionState } from "@/lib/forms";
 import { toRupees } from "@/lib/money";
-import { PAYMENT_METHODS } from "@/lib/constants";
+import { ENTITY_LABEL, PAYMENT_METHODS } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
@@ -109,7 +109,7 @@ export function RecordFields({ kind, options, defaults, defaultEntity, defaultDa
             <option value="">Not specified</option>
             {options.bankAccounts.map((b) => (
               <option key={b.id} value={b.id}>
-                {b.name} ({b.entityId === "factory" ? "Factory" : "Trupaths"})
+                {b.name} ({ENTITY_LABEL[b.entityId] ?? b.entityId})
               </option>
             ))}
           </NativeSelect>
