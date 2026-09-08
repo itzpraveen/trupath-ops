@@ -50,7 +50,7 @@ await step("add a sale from the ledger", async () => {
   await page.getByRole("button", { name: "Add sale" }).first().click();
   const dlg = page.getByRole("dialog");
   await dlg.waitFor();
-  await dlg.getByLabel("Amount (₹)").fill("1999");
+  await dlg.getByLabel(/^Amount \(₹\)/).fill("1999");
   await dlg.getByLabel(/Invoice \/ order no\./).fill("E2E-SALE-1");
   await shot("02-add-sale-dialog");
   await dlg.getByRole("button", { name: "Add sale" }).click();
@@ -63,8 +63,9 @@ await step("add an expense (factory books)", async () => {
   const dlg = page.getByRole("dialog");
   await dlg.waitFor();
   await dlg.getByLabel("Books").selectOption("factory");
-  await dlg.getByLabel("Amount (₹)").fill("450.50");
+  await dlg.getByLabel(/^Amount \(₹\)/).fill("450.50");
   await dlg.getByLabel("Category").selectOption("Tea & snacks");
+  await dlg.getByLabel(/GST in this bill/).fill("40.50");
   await dlg.getByLabel("Note").fill("E2E tea");
   await dlg.getByRole("button", { name: "Add expense" }).click();
   await waitToast("Expense recorded");
@@ -176,25 +177,41 @@ await step("job work order with materials", async () => {
   await page.locator('input[name="qtySent[]"]').first().fill("12.5");
   await page.getByRole("button", { name: "Create order" }).click();
   await page.waitForURL(/\/jobwork\/[0-9a-f-]{36}$/, { timeout: 20000 });
+  // pieces come back in two batches and each batch is billed on its own
   await page.getByRole("button", { name: "Receive pieces" }).click();
   dlg = page.getByRole("dialog");
-  await dlg.getByLabel("Accepted").fill("5");
+  await dlg.getByLabel("Accepted").fill("3");
   await dlg.getByRole("button", { name: "Record receipt" }).click();
   await waitToast("Receipt recorded");
-  await page.getByRole("button", { name: "Record bill" }).click();
+  await page.getByRole("button", { name: "Record bill", exact: true }).click();
   dlg = page.getByRole("dialog");
   await dlg.getByRole("button", { name: "Record bill" }).click();
-  await waitToast("Bill of");
+  await waitToast("Bill of ₹360");
+  await page.getByText("3 of 3 pcs billed").waitFor({ timeout: 15000 });
+  await page.getByRole("button", { name: "Receive pieces" }).click();
+  dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Accepted").fill("2");
+  await dlg.getByRole("button", { name: "Record receipt" }).click();
+  await page.getByText("2 accepted pieces not billed yet").waitFor({ timeout: 15000 });
+  await page.getByRole("button", { name: "Record next bill" }).click();
+  dlg = page.getByRole("dialog");
+  await dlg.getByRole("button", { name: "Record bill" }).click();
+  await waitToast("Bill of ₹240");
+  await page.getByText("5 of 5 pcs billed").waitFor({ timeout: 15000 });
   await shot("12-jobwork-detail");
 });
 await step("payments and payables", async () => {
   await page.goto(`${BASE}/payments?tab=payables`);
-  await page.getByText(`E2E Stitching Unit ${RUN}`).first().waitFor();
+  const row = page.getByRole("row").filter({ hasText: `E2E Stitching Unit ${RUN}` }).first();
+  await row.waitFor();
+  await row.getByText("₹600").waitFor();
   await shot("13-payables");
 });
 await step("reports render", async () => {
   await page.goto(`${BASE}/reports`);
   await page.getByText("Profit summary").waitFor();
+  await page.getByText("Output GST (other sales)").waitFor();
+  await page.getByText("₹40.50").first().waitFor();
   await shot("14-reports");
 });
 await step("settings: add a login", async () => {
@@ -264,3 +281,4 @@ console.log(results.join("\n"));
 console.log("console errors:", consoleErrors.length ? consoleErrors.slice(0, 10) : "none");
 await browser.close();
 fs.writeFileSync(`${OUT}/results.txt`, results.join("\n") + "\nconsole errors: " + JSON.stringify(consoleErrors.slice(0, 20)));
+process.exit(results.some((r) => r.startsWith("FAIL")) || consoleErrors.length ? 1 : 0);

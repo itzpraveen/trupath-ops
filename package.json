@@ -13,6 +13,8 @@
     "db:seed": "tsx src/db/seed.ts",
     "db:studio": "drizzle-kit studio",
     "db:setup": "pnpm db:migrate && pnpm db:seed",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "test:e2e": "node scripts/e2e.mjs",
     "start:render": "npm run db:migrate && npm run db:seed && next start -p ${PORT:-3000}",
     "stock:undo-import": "tsx scripts/undo-historical-stock.ts"
@@ -49,7 +51,8 @@
     "playwright-core": "^1.63.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.13",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^5.0.0"
   },
   "packageManager": "pnpm@10.13.1",
   "engines": {
