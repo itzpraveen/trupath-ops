@@ -45,6 +45,9 @@ services:
         value: "15"
       - key: CRON_SECRET
         generateValue: true
+      # Encrypts Shopify tokens and client secrets stored in the database. Keep it stable once set.
+      - key: APP_ENCRYPTION_KEY
+        generateValue: true
 
 databases:
   - name: trupath-db

@@ -179,10 +179,11 @@ async function main() {
 
   const [{ n: userCount }] = await db.select({ n: count() }).from(schema.users);
   if (Number(userCount) === 0) {
-    const email = (process.env.SEED_OWNER_EMAIL ?? "owner@trupaths.in").toLowerCase();
-    const password = process.env.SEED_OWNER_PASSWORD ?? "change-me-now";
+    // `||` rather than `??`: a variable left blank on Render must not create an owner with an empty email or password.
+    const email = (process.env.SEED_OWNER_EMAIL?.trim() || "owner@trupaths.in").toLowerCase();
+    const password = process.env.SEED_OWNER_PASSWORD?.trim() || "change-me-now";
     await db.insert(schema.users).values({
-      name: process.env.SEED_OWNER_NAME ?? "Owner",
+      name: process.env.SEED_OWNER_NAME?.trim() || "Owner",
       email,
       passwordHash: hashPassword(password),
       role: "owner",
