@@ -46,11 +46,14 @@ jobs:
       - run: pnpm lint
       - run: pnpm test
       - run: pnpm db:setup
+      - run: pnpm test:integration
+        env:
+          ALLOW_DB_TESTS: "1"
       - name: Browser test
         run: |
           PORT=3100 pnpm start > server.log 2>&1 &
           for i in $(seq 1 30); do curl -sf http://localhost:3100/api/health > /dev/null && break; sleep 1; done
-          CHROME_PATH=/usr/bin/google-chrome pnpm test:e2e ./e2e-shots
+          E2E_INVOICES=1 CHROME_PATH=/usr/bin/google-chrome pnpm test:e2e ./e2e-shots
       - uses: actions/upload-artifact@v4
         if: always()
         with:

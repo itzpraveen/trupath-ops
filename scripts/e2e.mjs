@@ -13,8 +13,10 @@ const results = [];
 const RUN = Date.now().toString(36);
 const pickOption = async (sel, text) => { const v = await sel.locator("option", { hasText: text }).first().getAttribute("value"); await sel.selectOption(v); };
 const step = async (name, fn) => {
+  if (process.env.E2E_DASHBOARD_ONLY === "1" && !/^(login|wrong password|brand dashboard)/.test(name)) return;
+  if (process.env.E2E_INVOICE_ONLY === "1" && !/^(login|wrong password|manual sale|reviewed invoice|unshipped invoice|cancelled invoice|new sale|credit note|brand dashboard)/.test(name)) return;
   try { await fn(); results.push(`PASS ${name}`); }
-  catch (e) { results.push(`FAIL ${name}: ${String(e.message ?? e).split("\n")[0].slice(0, 300)}`); }
+  catch (e) { console.error(`Failure details for ${name}:`, e.message ?? e); results.push(`FAIL ${name}: ${String(e.message ?? e).split("\n")[0].slice(0, 300)}`); }
 };
 
 const browser = await chromium.launch({ executablePath: CHROME, headless: true, args: ["--no-sandbox"] });
@@ -257,6 +259,13 @@ await step("settings: add a login", async () => {
   await dlg.getByLabel("Role").selectOption("factory");
   await dlg.getByRole("button", { name: "Create login" }).click();
   await waitToast("can now sign in");
+  await page.getByRole("button", {name:"Add login",exact:true}).click();
+  await page.getByRole("dialog").getByLabel("Name").fill("Inventory Test");
+  await page.getByRole("dialog").getByLabel("Email").fill(`inventory-${RUN}@trupaths.in`);
+  await page.getByRole("dialog").getByLabel("Password").fill("inventory-pass-123");
+  await page.getByRole("dialog").getByLabel("Role").selectOption("inventory");
+  await page.getByRole("dialog").getByRole("button", {name:"Create login",exact:true}).click();
+  await page.getByRole("dialog").waitFor({state:"hidden"});
   await shot("15-settings-users");
 });
 await step("owner can save their own login", async () => {
@@ -284,9 +293,23 @@ await step("factory role sees only factory modules", async () => {
   await p2.screenshot({ path: `${OUT}/17-mobile-factory.png` });
   await p2.goto(`${BASE}/sales`);
   if (!p2.url().startsWith(`${BASE}/?denied`)) throw new Error("factory user could open /sales: " + p2.url());
+  await p2.goto(`${BASE}/contacts`);
+  if (await p2.getByRole("columnheader", { name: "They owe", exact: true }).count() || await p2.getByRole("columnheader", { name: "We owe", exact: true }).count()) throw new Error("Factory role can see financial balances in contacts");
+  await p2.goto(`${BASE}/sales/new`);
+  if (!p2.url().startsWith(`${BASE}/?denied`)) throw new Error("factory user could open new sale");
+  await p2.goto(`${BASE}/?brand=firstbon`);
+  await p2.getByRole("heading",{name:"Factory today",exact:true}).waitFor();
+  if (await p2.getByRole("heading",{name:"This month",exact:true}).count() || await p2.getByText("Website revenue this month",{exact:true}).count()) throw new Error("Factory dashboard exposes financial summaries");
+  await p2.getByRole("link",{name:"Baby Gambling",exact:true}).waitFor();
   await p2.goto(`${BASE}/factory/materials`);
   await p2.screenshot({ path: `${OUT}/18-mobile-materials.png` });
   await c2.close();
+});
+await step("inventory dashboard shows dispatch and brands without sales totals", async () => {
+  const c=await browser.newContext();const p=await c.newPage();await p.goto(`${BASE}/login`);await p.getByLabel("Email").fill(`inventory-${RUN}@trupaths.in`);await p.getByLabel("Password").fill("inventory-pass-123");await p.getByRole("button",{name:"Sign in"}).click();await p.waitForURL(`${BASE}/stock`);
+  await p.goto(`${BASE}/?brand=babygambling`);await p.getByRole("heading",{name:"Dispatch today",exact:true}).waitFor();await p.getByRole("link",{name:"Firstbon",exact:true}).waitFor();
+  if (await p.getByText("Website revenue this month",{exact:true}).count() || await p.getByText("Sales today",{exact:true}).count()) throw new Error("Inventory dashboard exposes sales summaries");
+  await c.close();
 });
 await step("account menu: change password page, dark mode, sign out", async () => {
   await page.setViewportSize({ width: 1440, height: 1000 });
@@ -318,6 +341,118 @@ await step("dark mode + mobile dashboard", async () => {
   await page.waitForTimeout(400);
   await shot("20-mobile-menu");
 });
+
+if (process.env.E2E_INVOICES === "1") {
+  let issuedUrl;
+  await step("manual sale previews inclusive GST without issuing", async () => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(`${BASE}/sales/new`);
+    const product = process.env.E2E_INVOICE_PRODUCT ?? "Invoice browser test product";
+    await page.getByPlaceholder("Search product or SKU…").fill(product);
+    await page.getByRole("option").filter({ hasText: product }).first().click();
+    if (await page.getByLabel("Unit price including GST").inputValue() !== "1999") throw new Error("Product price did not populate");
+    if (await page.getByLabel("Order value (₹)").inputValue() !== "1999") throw new Error("The calculated sale total is missing");
+    await page.getByLabel("Saved customer (for statements)").selectOption({ label: process.env.E2E_INVOICE_CUSTOMER ?? "Invoice browser test customer" });
+    await page.getByLabel("Books", { exact: true }).selectOption({ label: process.env.E2E_INVOICE_BOOK ?? "Invoice browser test books" });
+    if (!await page.getByLabel("Address", { exact: true }).inputValue()) throw new Error("Customer address was not filled");
+    await page.getByRole("button", { name: "Save sale and review invoice" }).click();
+    await page.waitForURL(/\/print\/invoice\/preview\?/, { timeout: 15000 });
+    await page.getByText("DRAFT - NOT A TAX INVOICE", { exact: true }).waitFor();
+    for (const text of ["1,903.81", "95.19", "₹ 1,999.00"]) if (!(await page.locator("body").innerText()).includes(text)) throw new Error("Incorrect preview: " + text);
+    await page.screenshot({ path: `${OUT}/21-invoice-preview.png`, fullPage: true });
+    if (process.env.E2E_INVOICE_PDF) await page.pdf({ path: process.env.E2E_INVOICE_PDF, format: "A4", printBackground: true, preferCSSPageSize: true });
+  });
+  await step("reviewed invoice issues once and can be printed", async () => {
+    await page.getByRole("button", { name: "Issue invoice", exact: true }).click();
+    await page.waitForURL(/\/print\/invoice\/[0-9a-f-]{36}$/, { timeout: 15000 });
+    issuedUrl = page.url();
+    await page.getByText("Tax Invoice", { exact: true }).waitFor();
+    await page.getByRole("button", { name: "Print", exact: true }).waitFor();
+    await page.reload();
+    if (page.url() !== issuedUrl) throw new Error("Invoice did not keep its identity");
+    await page.screenshot({ path: `${OUT}/22-issued-invoice.png`, fullPage: true });
+  });
+  await step("unshipped invoice cancellation preserves the document", async () => {
+    if (!issuedUrl) throw new Error("Issuing did not complete");
+    await page.getByRole("button", { name: "Cancel invoice", exact: true }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("Reason", { exact: true }).fill(`End of browser test ${RUN} - no goods sold`);
+    await dialog.getByRole("button", { name: "Cancel invoice", exact: true }).click();
+    await page.getByText("CANCELLED", { exact: true }).waitFor();
+    if (page.url() !== issuedUrl) throw new Error("Cancelled invoice disappeared");
+  });
+  await step("cancelled invoice stays accessible in the invoice register", async () => {
+    await page.goto(`${BASE}/sales/invoices`);
+    await page.getByText(`Cancelled: End of browser test ${RUN} - no goods sold`, { exact: true }).waitFor();
+    await page.screenshot({ path: `${OUT}/24-invoice-register.png`, fullPage: true });
+  });
+  await step("new sale fits a phone screen", async () => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${BASE}/sales/new`);
+    const sizes = await page.evaluate(() => ({ width: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
+    if (sizes.scroll > sizes.width + 1) throw new Error("New sale has horizontal overflow");
+    await page.screenshot({ path: `${OUT}/23-mobile-new-sale.png`, fullPage: true });
+  });
+}
+
+await step("brand dashboard shows Baby Gambling separately from accounting books", async () => {
+  await page.setViewportSize({width:390,height:844});
+  await page.goto(`${BASE}/?brand=babygambling`);
+  await page.getByRole("link",{name:"Baby Gambling",exact:true}).waitFor();
+  if (await page.getByRole("link",{name:"Baby Gambling",exact:true}).getAttribute("aria-current")!=="page") throw new Error("Brand is not selected");
+  await page.getByText("Accounting books",{exact:true}).waitFor();
+  const sizes=await page.evaluate(()=>({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth}));
+  await page.screenshot({path:`${OUT}/27-brand-dashboard-mobile.png`,fullPage:true});
+  if (sizes.scroll>sizes.width+1) {
+    const wide = await page.evaluate(() => [...document.querySelectorAll("body *")].filter(el => el.getBoundingClientRect().right > document.documentElement.clientWidth + 1).slice(0, 12).map(el => ({ tag: el.tagName, class: el.className, width: Math.round(el.getBoundingClientRect().width) })));
+    throw new Error(`Brand dashboard overflows on a phone: ${JSON.stringify({ ...sizes, wide })}`);
+  }
+  const ledgerLink = page.getByRole("link",{name:"Open ledger",exact:true});
+  await ledgerLink.evaluate(el => el.scrollIntoView({ block: "center" }));
+  await ledgerLink.click();
+  if (!page.url().includes("brand=babygambling")) await page.waitForURL(/brand=babygambling/);
+  await page.getByRole("button",{name:"Add expense",exact:true}).click();
+  if (await page.getByRole("dialog").getByLabel("Brand",{exact:true}).inputValue()!=="babygambling") throw new Error("Brand not carried into entry form");
+  await page.keyboard.press("Escape");
+  await page.getByRole("dialog").waitFor({state:"hidden"});
+});
+
+if (process.env.E2E_INVOICES === "1") {
+  let creditUrl;
+  await step("credit note previews a partial return on a phone", async () => {
+    await page.setViewportSize({width:390,height:844});
+    await page.goto(`${BASE}/sales/invoices?q=Credit%20note%20browser`);
+    await page.getByRole("row").filter({hasText:"Credit note browser"}).first().getByRole("link").first().click();
+    await page.getByRole("link",{name:"Record return / credit note",exact:true}).click();
+    await page.getByLabel("Return Invoice browser test product",{exact:true}).fill("1");
+    await page.getByLabel("Restock Invoice browser test product",{exact:true}).fill("1");
+    await page.getByLabel("Reason for return",{exact:true}).fill(`Browser return ${RUN} — inspected and saleable`);
+    await page.getByText("DRAFT - NOT AN ISSUED CREDIT NOTE",{exact:true}).waitFor();
+    const sizes=await page.evaluate(()=>({width:document.documentElement.clientWidth,scroll:document.documentElement.scrollWidth}));
+    if (sizes.scroll>sizes.width+1) throw new Error("Return form overflows the phone screen");
+    await page.screenshot({path:`${OUT}/25-credit-note-mobile.png`,fullPage:true});
+    await page.getByRole("checkbox").check();
+  });
+  await step("credit note issues and links back to the unchanged original", async () => {
+    await page.getByRole("button",{name:"Issue credit note",exact:true}).click();
+    await page.waitForURL(/\/print\/credit-note\/[0-9a-f-]{36}$/, {timeout:15000});
+    creditUrl=page.url();
+    await page.getByText("Credit Note",{exact:true}).waitFor();
+    for (const text of ["1,903.81","95.19","₹ 1,999.00"]) if (!(await page.locator("body").innerText()).includes(text)) throw new Error("Incorrect credit note: "+text);
+    await page.setViewportSize({width:1440,height:1000});
+    await page.screenshot({path:`${OUT}/26-credit-note.png`,fullPage:true});
+    if (process.env.E2E_CREDIT_PDF) await page.pdf({path:process.env.E2E_CREDIT_PDF,format:"A4",printBackground:true,preferCSSPageSize:true});
+    await page.getByRole("link",{name:/^Original invoice B2C/}).click();
+    await page.getByText("Tax Invoice",{exact:true}).waitFor();
+    await page.getByRole("link",{name:"Record return / credit note",exact:true}).click();
+    await page.getByText("1 remaining · original GST 5%",{exact:true}).waitFor();
+  });
+  await step("credit note is available in its register", async () => {
+    await page.goto(`${BASE}/sales/credit-notes`);
+    await page.getByRole("row").filter({hasText:`Browser return ${RUN}`}).getByRole("link",{name:/^CN\//}).click();
+    if (page.url()!==creditUrl) await page.waitForURL(creditUrl);
+  });
+}
 
 console.log(results.join("\n"));
 console.log("console errors:", consoleErrors.length ? consoleErrors.slice(0, 10) : "none");

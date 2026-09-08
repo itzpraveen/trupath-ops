@@ -20,6 +20,20 @@ const schema = z.object({
   priceP: zOptionalMoney,
   costP: zOptionalMoney,
   minStock: zInt("Minimum stock").optional(),
+  hsnCode: zOptional(12),
+  gstRate: z
+    .string()
+    .trim()
+    .optional()
+    .transform((v, ctx) => {
+      if (!v) return null;
+      const n = Number(v);
+      if (!Number.isFinite(n) || n < 0 || n > 100) {
+        ctx.addIssue({ code: "custom", message: "GST rate must be a percentage between 0 and 100" });
+        return z.NEVER;
+      }
+      return Math.round(n * 100) / 100;
+    }),
   active: zBool,
   openingQty: zInt("Opening stock").optional(),
 });
@@ -38,7 +52,7 @@ export async function saveProduct(_prev: ActionState, formData: FormData): Promi
         .limit(1);
       if (dup) return { error: `SKU ${d.sku} is already used by another product`, fieldErrors: { sku: ["Already used"] } };
     }
-    const values = { brandId: d.brandId, name: d.name, variant: d.variant ?? "", sku: d.sku ?? null, category: d.category ?? null, priceP: d.priceP, costP: d.costP, minStock: d.minStock ?? 0 };
+    const values = { brandId: d.brandId, name: d.name, variant: d.variant ?? "", sku: d.sku ?? null, category: d.category ?? null, priceP: d.priceP, costP: d.costP, minStock: d.minStock ?? 0, hsnCode: d.hsnCode ?? null, gstRate: d.gstRate };
     let id = d.id;
     await db.transaction(async (tx) => {
       if (id) {

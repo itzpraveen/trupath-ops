@@ -6,6 +6,8 @@ import { z } from "zod";
 import { db } from "@/db";
 import { brands, categories, entities, sessions, users, ROLES, type CategoryKind } from "@/db/schema";
 import { audit } from "@/lib/audit";
+import { todayIST } from "@/lib/dates";
+import { setNextInvoiceNumber } from "@/lib/numbering";
 import { getCurrentUser, hashPassword, requireEditor, verifyPassword, AuthError, revokeOtherSessions } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zEnum, zOptional, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
 import { entityExists } from "@/lib/queries/common";
@@ -19,6 +21,26 @@ const entitySchema = z.object({
   stateCode: zOptional(4),
   phone: zOptional(30),
   email: zOptional(150),
+  invoicePrefix: zOptional(6),
+  shippingTaxTreatment: z.enum(["goods", "separate"]).default("goods"),
+  eInvoiceStatus: z.enum(["unconfirmed", "required", "not_required"]).default("unconfirmed"),
+  eInvoiceReview: zOptional(500),
+  nextCreditNoteNo: z.string().trim().optional().transform(v => v ? Number(v) : undefined).refine(n => n === undefined || (Number.isSafeInteger(n) && n >= 1), "Enter a positive whole number"),
+  shippingHsn: zOptional(8).refine((v) => !v || /^\d{4,8}$/.test(v), "Enter a valid shipping HSN / SAC"),
+  nextB2BInvoiceNo: z.string().trim().optional().transform((v) => v ? Number(v) : undefined).refine((n) => n === undefined || (Number.isSafeInteger(n) && n >= 1), "Enter a positive whole number"),
+  nextInvoiceNo: z
+    .string()
+    .trim()
+    .optional()
+    .transform((v, ctx) => {
+      if (!v) return undefined;
+      const n = Number(v);
+      if (!Number.isInteger(n) || n < 1) {
+        ctx.addIssue({ code: "custom", message: "Enter a whole number of 1 or more" });
+        return z.NEVER;
+      }
+      return n;
+    }),
 });
 
 export async function saveEntity(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -28,8 +50,16 @@ export async function saveEntity(_prev: ActionState, formData: FormData): Promis
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     if (!(await entityExists(d.id))) return { error: "Unknown books" };
-    await db.update(entities).set({ name: d.name, legalName: d.legalName ?? null, gstin: d.gstin?.toUpperCase() ?? null, address: d.address ?? null, stateCode: d.stateCode ?? null, phone: d.phone ?? null, email: d.email ?? null }).where(eq(entities.id, d.id));
-    await audit(db, { userId: user.id, action: "update", entityType: "entity", entityId: d.id, summary: `Updated company details for ${d.name}` });
+    if (d.eInvoiceStatus === "not_required" && !d.eInvoiceReview?.trim()) return { error: "Record the accountant's reason for e-invoicing not being required", fieldErrors: { eInvoiceReview: ["Confirmation is required"] } };
+    const invoicePrefix = (d.invoicePrefix ?? "B2C").toUpperCase().replace(/[^A-Z0-9-]/g, "") || "B2C";
+    await db.transaction(async (tx) => {
+      await tx.update(entities).set({ name: d.name, legalName: d.legalName ?? null, gstin: d.gstin?.toUpperCase() ?? null, address: d.address ?? null, stateCode: d.stateCode ?? null, phone: d.phone ?? null, email: d.email ?? null, invoicePrefix, shippingHsn: d.shippingHsn ?? null, shippingTaxTreatment: d.shippingTaxTreatment, eInvoiceStatus: d.eInvoiceStatus, eInvoiceReview: d.eInvoiceReview ?? null }).where(eq(entities.id, d.id));
+      if (d.gstin) await tx.update(entities).set({eInvoiceStatus:d.eInvoiceStatus,eInvoiceReview:d.eInvoiceReview??null}).where(eq(entities.gstin,d.gstin.toUpperCase()));
+      for (const [prefix, next] of [[invoicePrefix, d.nextInvoiceNo], ["B2B", d.nextB2BInvoiceNo], ["CN", d.nextCreditNoteNo]] as const) {
+        if (next !== undefined) await setNextInvoiceNumber(tx, d.id, prefix, todayIST(), next);
+      }
+      await audit(tx, { userId: user.id, action: "update", entityType: "entity", entityId: d.id, summary: `Updated company details for ${d.name}; next B2C ${d.nextInvoiceNo ?? "unchanged"}, B2B ${d.nextB2BInvoiceNo ?? "unchanged"}` });
+    });
     revalidatePath("/settings");
     return { ok: true, message: "Company details saved" };
   } catch (err) {

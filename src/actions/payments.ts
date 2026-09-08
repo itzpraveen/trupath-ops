@@ -1,10 +1,10 @@
 "use server";
 
-import { eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { bankAccounts, payments } from "@/db/schema";
+import { bankAccounts, businessRecords, contacts, payments, creditNotes, invoices } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zDate, zEnum, zMoney, zOptional, zOptionalMoney, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
@@ -37,6 +37,22 @@ export async function createPayment(_prev: ActionState, formData: FormData): Pro
     const d = parsed.data;
     if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     const id = await db.transaction(async (tx) => {
+      if (d.bankAccountId) {
+        const [account] = await tx.select().from(bankAccounts).where(eq(bankAccounts.id, d.bankAccountId)).for("update");
+        if (!account?.active || account.entityId !== d.entityId) throw new Error("Choose an active cash or bank account belonging to these books");
+      }
+      if (d.contactId) {
+        const [contact] = await tx.select().from(contacts).where(eq(contacts.id, d.contactId));
+        if (!contact?.active) throw new Error("Choose an active customer or supplier");
+      }
+      if (d.recordId) {
+        const [record] = await tx.select().from(businessRecords).where(eq(businessRecords.id, d.recordId)).for("update");
+        if (!record || record.voidedAt || record.entityId !== d.entityId || record.contactId !== (d.contactId ?? null) || record.paymentTerms !== "credit" || (d.direction === "in" ? record.kind !== "sale" : !["expense", "purchase", "return"].includes(record.kind))) throw new Error("Choose an unpaid bill for this contact in these books");
+        const [paid] = await tx.select({ total: sql<number>`coalesce(sum(${payments.amountP}), 0)::float8` }).from(payments).where(and(eq(payments.recordId, record.id), isNull(payments.voidedAt)));
+        const [credited] = await tx.select({ total: sql<number>`coalesce(sum(${creditNotes.totalP}),0)::float8` }).from(creditNotes).innerJoin(invoices, eq(invoices.id,creditNotes.invoiceId)).where(eq(invoices.recordId,record.id));
+        if (d.amountP > record.amountP - Number(paid.total) - (record.kind === "sale" ? Number(credited.total) : 0)) throw new Error("This payment exceeds the unpaid amount on the selected bill");
+      }
+
       const number = await nextNumber(tx, d.direction === "in" ? "receipt" : "payment", d.workDate);
       const [row] = await tx
         .insert(payments)
@@ -87,9 +103,15 @@ export async function saveBankAccount(_prev: ActionState, formData: FormData): P
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
-    if (d.id) await db.update(bankAccounts).set({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP, active: d.active }).where(eq(bankAccounts.id, d.id));
-    else await db.insert(bankAccounts).values({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP });
-    await audit(db, { userId: user.id, action: d.id ? "update" : "create", entityType: "bank_account", entityId: d.id ?? null, summary: `${d.id ? "Updated" : "Added"} account ${d.name}` });
+    await db.transaction(async (tx) => {
+      if (d.id) {
+        const [existing] = await tx.select().from(bankAccounts).where(eq(bankAccounts.id, d.id)).for("update");
+        if (!existing) throw new Error("Account not found");
+        if (existing.entityId !== d.entityId) throw new Error("An account cannot be moved between books. Create a separate account instead.");
+        await tx.update(bankAccounts).set({ name: d.name, type: d.type, openingP: d.openingP, active: d.active }).where(eq(bankAccounts.id, d.id));
+      } else await tx.insert(bankAccounts).values({ entityId: d.entityId, name: d.name, type: d.type, openingP: d.openingP });
+      await audit(tx, { userId: user.id, action: d.id ? "update" : "create", entityType: "bank_account", entityId: d.id ?? null, summary: `${d.id ? "Updated" : "Added"} account ${d.name}` });
+    });
     revalidateMoney();
     return { ok: true, message: "Account saved" };
   } catch (err) {

@@ -49,7 +49,7 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
   return (
     <>
       <PageHeader title="Reports" description={`${label} · ${entity === "all" ? "all books" : entityRows.find((e) => e.id === entity)?.name ?? entity}`}>
-        <Link href={`/api/export/records${qs({ entity, month })}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
+        <Link href={`/api/export/records${qs({ entity, from, to })}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Download /> Ledger CSV
         </Link>
       </PageHeader>
@@ -221,10 +221,10 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
             <Stat label="Stock at cost" value={formatINR(Math.round(valuation.fgValue + valuation.rmValue))} hint="finished + raw" />
           </StatGrid>
           <div className="mt-3 flex flex-wrap gap-2">
-            <Link href={`/api/export/production?month=${month}`} className={buttonVariants({ variant: "outline", size: "sm" })}><Download /> Production CSV</Link>
+            <Link href={`/api/export/production${qs({ from, to })}`} className={buttonVariants({ variant: "outline", size: "sm" })}><Download /> Production CSV</Link>
             <Link href="/api/export/stock" className={buttonVariants({ variant: "outline", size: "sm" })}><Download /> Stock CSV</Link>
             <Link href="/api/export/materials" className={buttonVariants({ variant: "outline", size: "sm" })}><Download /> Materials CSV</Link>
-            <Link href={`/api/export/attendance?month=${month}`} className={buttonVariants({ variant: "outline", size: "sm" })}><Download /> Attendance CSV</Link>
+            <Link href={`/api/export/attendance${qs({ from, to })}`} className={buttonVariants({ variant: "outline", size: "sm" })}><Download /> Attendance CSV</Link>
           </div>
         </Section>
       </div>

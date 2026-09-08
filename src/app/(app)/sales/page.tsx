@@ -1,16 +1,16 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull } from "drizzle-orm";
 import { Download, Pencil } from "lucide-react";
 import { cn } from "cn";
 import { voidRecord } from "@/actions/records";
 import { db } from "@/db";
-import { uploads } from "@/db/schema";
+import { invoices, uploads } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
 import { monthKey, monthRange, formatDate, todayIST } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
-import { getBankAccounts, getCategories, getContacts, getEntities, PAYMENT_METHOD_LABEL } from "@/lib/queries/common";
+import { getBankAccounts, getBrands, getCategories, getContacts, getEntities, PAYMENT_METHOD_LABEL } from "@/lib/queries/common";
 import { listRecords, netOf, totalsByKind } from "@/lib/queries/records";
 import { int, pick, qs, str } from "@/lib/url";
 import { Button, buttonVariants } from "@/components/ui/button";
@@ -32,7 +32,8 @@ const KIND_TONE = { sale: "success", expense: "destructive", return: "warning", 
 export default async function SalesPage(props: PageProps<"/sales">) {
   const user = await requireUser("sales");
   const sp = await props.searchParams;
-  const entityRows = await getEntities();
+  const [entityRows, brandRows] = await Promise.all([getEntities(), getBrands()]);
+  const brand = pick(sp.brand,["all","unassigned",...brandRows.map(b=>b.id)],"all");
   const entity = pick(sp.entity, ["all", ...entityRows.map((e) => e.id)], "all");
   const kind = pick(sp.kind, ["all", "sale", "expense", "return", "purchase"], "all");
   const month = /^\d{4}-\d{2}$/.test(String(sp.month ?? "")) ? String(sp.month) : monthKey();
@@ -40,11 +41,11 @@ export default async function SalesPage(props: PageProps<"/sales">) {
   const page = int(sp.page);
   const voided = sp.voided === "1";
   const [from, to] = monthRange(month);
-  const params = { entity, kind, month, q: q || undefined, voided: voided ? "1" : undefined };
+  const params = { entity, brand, kind, month, q: q || undefined, voided: voided ? "1" : undefined };
 
   const [list, totals, entities, channels, expenseCats, contacts, banks] = await Promise.all([
-    listRecords({ entity, kind, from, to, q, includeVoided: voided, page }),
-    totalsByKind({ entity, from, to }),
+    listRecords({ entity, brand, kind, from, to, q, includeVoided: voided, page }),
+    totalsByKind({ entity, brand, from, to }),
     getEntities(),
     getCategories("channel"),
     getCategories("expense"),
@@ -52,6 +53,7 @@ export default async function SalesPage(props: PageProps<"/sales">) {
     getBankAccounts(),
   ]);
   const options = {
+    brands: brandRows.map(b=>({id:b.id,name:b.name})),
     entities: entities.map((e) => ({ id: e.id, name: e.name })),
     channels: channels.map((c) => c.name),
     expenseCategories: expenseCats.map((c) => c.name),
@@ -68,11 +70,20 @@ export default async function SalesPage(props: PageProps<"/sales">) {
         .orderBy(desc(uploads.createdAt))
     : [];
   const filesFor = (recordId: string) => files.filter((f) => f.refId === recordId).map((f) => ({ id: f.id, fileName: f.fileName, size: f.size, createdAt: f.createdAt.toISOString() }));
+  const invoiceRows = list.rows.length
+    ? await db
+        .select({ id: invoices.id, number: invoices.number, recordId: invoices.recordId })
+        .from(invoices)
+        .where(and(isNull(invoices.voidedAt), inArray(invoices.recordId, list.rows.map((r) => r.record.id))))
+    : [];
+  const invoiceFor = (recordId: string) => invoiceRows.find((i) => i.recordId === recordId);
 
   return (
     <>
-      <PageHeader title="Sales & expenses" description="Every rupee in and out, for the brand and the factory separately.">
-        {editable ? <AddRecordButtons options={options} defaultEntity={entity === "all" ? "brand" : entity} defaultDate={todayIST()} /> : null}
+      <PageHeader title="Sales & expenses" description="Sales and expenses by accounting books and brand. Shared costs stay unassigned until accounts allocates them.">
+        <Link href="/sales/invoices" className={buttonVariants({ variant: "outline", size: "sm" })}>Tax invoices</Link>
+        {editable ? <Link href="/sales/new" className={buttonVariants({ size: "sm" })}>New sale / tax invoice</Link> : null}
+        {editable ? <AddRecordButtons options={options} defaultEntity={entity === "all" ? "brand" : entity} defaultDate={todayIST()} defaultBrand={brand} /> : null}
         <Link href={`/api/export/records${qs(params)}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Download /> Export CSV
         </Link>
@@ -86,9 +97,10 @@ export default async function SalesPage(props: PageProps<"/sales">) {
             </Link>
           ))}
         </div>
-        <MonthNav month={month} basePath="/sales" params={{ entity, kind, q: q || undefined }} />
+        <MonthNav month={month} basePath="/sales" params={{ entity, brand, kind, q: q || undefined }} />
       </div>
 
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-sm"><span className="font-medium">Brand</span>{[["all","All brands"],["unassigned","Shared / unassigned"],...brandRows.map(b=>[b.id,b.name])].map(([id,name])=><Link key={id} href={`/sales${qs({...params,brand:id,page:undefined})}`} className={cn("rounded-full border px-3 py-1",brand===id ? "bg-foreground text-background":"bg-card")}>{name}</Link>)}</div>
       <StatGrid className="mb-5">
         <Stat label="Sales" value={formatINR(totals.sale.total)} hint={`${totals.sale.count} entries`} />
         <Stat label="Expenses" value={formatINR(totals.expense.total)} hint={`${totals.expense.count} entries`} />
@@ -111,7 +123,7 @@ export default async function SalesPage(props: PageProps<"/sales">) {
           ))}
         </div>
         <form className="flex items-center gap-2" action="/sales">
-          <input type="hidden" name="entity" value={entity} />
+          <input type="hidden" name="entity" value={entity} /><input type="hidden" name="brand" value={brand} />
           <input type="hidden" name="kind" value={kind} />
           <input type="hidden" name="month" value={month} />
           {voided ? <input type="hidden" name="voided" value="1" /> : null}
@@ -148,7 +160,14 @@ export default async function SalesPage(props: PageProps<"/sales">) {
               list.rows.map(({ record: r, contactName, userName }) => (
                 <TableRow key={r.id} className={cn(r.voidedAt && "opacity-50")}>
                   <TableCell className="whitespace-nowrap">{formatDate(r.workDate, "d MMM")}</TableCell>
-                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">{r.number ?? "—"}</TableCell>
+                  <TableCell className="whitespace-nowrap text-xs text-muted-foreground">
+                    {r.number ?? "—"}
+                    {invoiceFor(r.id) ? (
+                      <Link href={`/print/invoice/${invoiceFor(r.id)!.id}`} target="_blank" className="block text-primary hover:underline">
+                        {invoiceFor(r.id)!.number}
+                      </Link>
+                    ) : null}
+                  </TableCell>
                   <TableCell>
                     <StatusBadge tone={KIND_TONE[r.kind]}>{r.kind}</StatusBadge>
                     {r.entityId === "factory" ? <span className="ml-1 text-xs text-muted-foreground">Factory</span> : null}
@@ -181,7 +200,7 @@ export default async function SalesPage(props: PageProps<"/sales">) {
                           {r.source === "manual" ? (
                             <EditRecordDialog record={r} options={options} />
                           ) : null}
-                          <ConfirmAction
+                          {r.source !== "shopify" && r.source !== "dispatch" ? <ConfirmAction
                             trigger={<Button variant="ghost" size="xs" className="text-muted-foreground" />}
                             title={`Void ${r.number ?? "this entry"}?`}
                             description="The entry stays in the history but no longer counts. Add a fresh entry if it was a mistake."
@@ -192,7 +211,7 @@ export default async function SalesPage(props: PageProps<"/sales">) {
                             withReason
                           >
                             Void
-                          </ConfirmAction>
+                          </ConfirmAction> : <Link href={r.shopifyOrderId ? `/orders/${r.shopifyOrderId}` : `/dispatch/${r.sourceRef?.replace("dispatch:", "")}`} className="text-xs text-primary underline">Open sale</Link>}
                         </div>
                       ) : null}
                     </TableCell>

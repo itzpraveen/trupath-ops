@@ -1,10 +1,10 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { businessRecords, type RecordKind } from "@/db/schema";
+import { bankAccounts, brands, businessRecords, invoices, payments, type RecordKind } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zDate, zEnum, zMoney, zOptional, zOptionalMoney, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
@@ -18,6 +18,7 @@ const KIND_LABEL: Record<RecordKind, string> = { sale: "Sale", expense: "Expense
 
 const recordSchema = z.object({
   kind: zEnum(KINDS, "type"),
+  brandId: zOptional(40),
   entityId: zRequired("Books", 40),
   workDate: zDate,
   amountP: zMoney("Amount"),
@@ -48,6 +49,11 @@ export async function createRecord(_prev: ActionState, formData: FormData): Prom
     if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     if (d.gstP >= d.amountP) return { error: "GST must be less than the amount", fieldErrors: { gstP: ["Must be less than the amount"] } };
     const id = await db.transaction(async (tx) => {
+      if (d.brandId && !(await tx.select({id:brands.id}).from(brands).where(and(eq(brands.id,d.brandId),eq(brands.active,true))))[0]) throw new Error("Choose an active brand or Shared / unassigned");
+      if (d.bankAccountId) {
+        const [account] = await tx.select().from(bankAccounts).where(eq(bankAccounts.id, d.bankAccountId)).for("update");
+        if (!account?.active || account.entityId !== d.entityId) throw new Error("Choose an active account belonging to these books");
+      }
       const number = await nextNumber(tx, d.kind, d.workDate);
       const [row] = await tx
         .insert(businessRecords)
@@ -56,6 +62,7 @@ export async function createRecord(_prev: ActionState, formData: FormData): Prom
           kind: d.kind,
           entityId: d.entityId,
           workDate: d.workDate,
+          brandId: d.brandId ?? null,
           amountP: d.amountP,
           channel: d.channel ?? (d.kind === "sale" || d.kind === "return" ? "Offline / direct" : ""),
           category: d.category ?? "",
@@ -63,7 +70,7 @@ export async function createRecord(_prev: ActionState, formData: FormData): Prom
           contactId: d.contactId ?? null,
           paymentMethod: d.paymentMethod,
           bankAccountId: d.bankAccountId ?? null,
-          paymentTerms: d.paymentMethod === "credit" ? "credit" : "paid",
+          paymentTerms: ["credit", "cod"].includes(d.paymentMethod) ? "credit" : "paid",
           taxableP: d.gstP ? d.taxableP || d.amountP - d.gstP : null,
           gstP: d.gstP || null,
           note: d.note ?? null,
@@ -94,10 +101,20 @@ export async function updateRecord(_prev: ActionState, formData: FormData): Prom
     if (existing.source !== "manual") return { error: "Synced records are managed by the source system. Void it instead." };
     if (d.gstP >= d.amountP) return { error: "GST must be less than the amount", fieldErrors: { gstP: ["Must be less than the amount"] } };
     await db.transaction(async (tx) => {
+      await tx.select({ id: businessRecords.id }).from(businessRecords).where(eq(businessRecords.id, d.id)).for("update");
+      const [invoice] = await tx.select({ id: invoices.id }).from(invoices).where(and(eq(invoices.recordId, d.id), isNull(invoices.voidedAt)));
+      const [payment] = await tx.select({ id: payments.id }).from(payments).where(and(eq(payments.recordId, d.id), isNull(payments.voidedAt)));
+      if (invoice || payment) throw new Error("This entry has an issued invoice or allocated payment. Accounts must review it before editing.");
+      if (d.brandId && !(await tx.select({id:brands.id}).from(brands).where(and(eq(brands.id,d.brandId),eq(brands.active,true))))[0]) throw new Error("Choose an active brand or Shared / unassigned");
+      if (d.bankAccountId) {
+        const [account] = await tx.select().from(bankAccounts).where(eq(bankAccounts.id, d.bankAccountId));
+        if (!account?.active || account.entityId !== existing.entityId) throw new Error("Choose an active account belonging to these books");
+      }
       await tx
         .update(businessRecords)
         .set({
           workDate: d.workDate,
+          brandId: d.brandId ?? null,
           amountP: d.amountP,
           channel: d.channel ?? existing.channel,
           category: d.category ?? "",
@@ -105,7 +122,7 @@ export async function updateRecord(_prev: ActionState, formData: FormData): Prom
           contactId: d.contactId ?? null,
           paymentMethod: d.paymentMethod,
           bankAccountId: d.bankAccountId ?? null,
-          paymentTerms: d.paymentMethod === "credit" ? "credit" : "paid",
+          paymentTerms: ["credit", "cod"].includes(d.paymentMethod) ? "credit" : "paid",
           taxableP: d.gstP ? d.taxableP || d.amountP - d.gstP : null,
           gstP: d.gstP || null,
           note: d.note ?? null,
@@ -131,7 +148,12 @@ export async function voidRecord(_prev: ActionState, formData: FormData): Promis
     const [existing] = await db.select().from(businessRecords).where(and(eq(businessRecords.id, id))).limit(1);
     if (!existing) return { error: "Record not found" };
     if (existing.voidedAt) return { error: "Already voided" };
+    if (existing.source === "shopify" || existing.source === "dispatch") return { error: "Cancel or return the sale from its order or dispatch so the invoice and stock stay consistent." };
     await db.transaction(async (tx) => {
+      await tx.select({ id: businessRecords.id }).from(businessRecords).where(eq(businessRecords.id, id)).for("update");
+      const [invoice] = await tx.select({ id: invoices.id }).from(invoices).where(and(eq(invoices.recordId, id), isNull(invoices.voidedAt)));
+      const [payment] = await tx.select({ id: payments.id }).from(payments).where(and(eq(payments.recordId, id), isNull(payments.voidedAt)));
+      if (invoice || payment) throw new Error("This entry has an issued invoice or allocated payment. Accounts must review it before voiding.");
       await tx.update(businessRecords).set({ voidedAt: new Date(), voidedBy: user.id, voidReason: reason }).where(eq(businessRecords.id, id));
       await audit(tx, { userId: user.id, action: "void", entityType: "record", entityId: id, summary: `Voided ${existing.number ?? existing.kind} ${formatINR(existing.amountP)}: ${reason}` });
     });

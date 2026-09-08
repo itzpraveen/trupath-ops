@@ -9,9 +9,9 @@ import { FULFIL_SCOPE, getStoreByShop, hasScope, INVENTORY_SCOPES, listStores, s
 /* Fulfil an order in Shopify (customer gets the tracking email)        */
 /* ------------------------------------------------------------------ */
 
-type FulfillmentOrderNode = { id: string; status: string; lineItems: { nodes: Array<{ id: string; remainingQuantity: number }> } };
+import { fulfillmentPlan, type FulfillmentOrderNode } from "@/lib/fulfillment-plan";
 
-export async function fulfillShopifyOrder(orderId: string, tracking: { company?: string | null; number?: string | null; url?: string | null }, notifyCustomer = true) {
+export async function fulfillShopifyOrder(orderId: string, tracking: { company?: string | null; number?: string | null; url?: string | null }, notifyCustomer = true, requested?: Array<{ variantId: string | null; qty: number }>) {
   const [order] = await db.select({ id: shopifyOrders.id, name: shopifyOrders.name, shop: shopifyOrders.shop }).from(shopifyOrders).where(eq(shopifyOrders.id, orderId)).limit(1);
   if (!order) throw new Error("Order not found");
   const store = order.shop ? await getStoreByShop(order.shop) : null;
@@ -19,19 +19,20 @@ export async function fulfillShopifyOrder(orderId: string, tracking: { company?:
   if (!store || !auth) throw new Error("The store this order came from is not connected.");
   if (!hasScope(store.scope, FULFIL_SCOPE)) throw new Error(`${store.label} has not granted the fulfilment permission yet. Add the new scopes to the Shopify app and press "Update permissions" in Settings → Shopify.`);
 
-  const data: { order: { fulfillmentOrders: { nodes: FulfillmentOrderNode[] } } | null } = await shopifyGraphQL(
-    `query FulfillmentOrders($id: ID!) { order(id: $id) { fulfillmentOrders(first: 10) { nodes { id status lineItems(first: 100) { nodes { id remainingQuantity } } } } } }`,
+  const data: { order: { fulfillmentOrders: { pageInfo?: { hasNextPage: boolean }; nodes: FulfillmentOrderNode[] } } | null } = await shopifyGraphQL(
+    `query FulfillmentOrders($id: ID!) { order(id: $id) { fulfillmentOrders(first: 10) { pageInfo { hasNextPage } nodes { id status lineItems(first: 50) { pageInfo { hasNextPage } nodes { id remainingQuantity totalQuantity lineItem { variant { id } } } } } } } }`,
     { id: `gid://shopify/Order/${orderId}` },
     auth,
   );
-  const open = (data.order?.fulfillmentOrders.nodes ?? []).filter((fo) => ["OPEN", "IN_PROGRESS"].includes(fo.status) && fo.lineItems.nodes.some((li) => li.remainingQuantity > 0));
-  if (!open.length) {
+  if (data.order?.fulfillmentOrders.pageInfo?.hasNextPage) throw new Error("This order has too many fulfillment groups. Complete its fulfillment in Shopify.");
+  const plan = fulfillmentPlan(data.order?.fulfillmentOrders.nodes ?? [], requested);
+  if (!plan.length) {
     await syncSingleOrder(orderId, auth);
-    return { fulfilled: 0, message: `${order.name} has nothing left to fulfil in Shopify` };
+    return { fulfilled: 0, message: `${order.name}: these items have already been fulfilled in Shopify` };
   }
   const trackingInfo = tracking.number || tracking.company || tracking.url ? { company: tracking.company || undefined, number: tracking.number || undefined, url: tracking.url || undefined } : undefined;
   const input = {
-    lineItemsByFulfillmentOrder: open.map((fo) => ({ fulfillmentOrderId: fo.id, fulfillmentOrderLineItems: fo.lineItems.nodes.filter((li) => li.remainingQuantity > 0).map((li) => ({ id: li.id, quantity: li.remainingQuantity })) })),
+    lineItemsByFulfillmentOrder: plan,
     notifyCustomer,
     ...(trackingInfo ? { trackingInfo } : {}),
   };
@@ -42,7 +43,7 @@ export async function fulfillShopifyOrder(orderId: string, tracking: { company?:
   );
   if (r.fulfillmentCreate.userErrors.length) throw new Error(`Shopify refused the fulfilment: ${r.fulfillmentCreate.userErrors.map((e) => e.message).join(", ")}`);
   await syncSingleOrder(orderId, auth);
-  return { fulfilled: open.length, message: `${order.name} marked fulfilled in Shopify${trackingInfo ? " with tracking" : ""}${notifyCustomer ? "; customer notified" : ""}` };
+  return { fulfilled: plan.length, message: `${order.name} parcel items fulfilled in Shopify${trackingInfo ? " with tracking" : ""}${notifyCustomer ? "; customer notified" : ""}` };
 }
 
 /* ------------------------------------------------------------------ */

@@ -120,8 +120,9 @@ type OrderNode = {
   email: string | null;
   phone: string | null;
   paymentGatewayNames: string[];
+  taxesIncluded: boolean;
   shippingAddress: { name: string | null; address1: string | null; address2: string | null; city: string | null; province: string | null; provinceCode: string | null; zip: string | null; country: string | null; phone: string | null } | null;
-  billingAddress: { name: string | null } | null;
+  billingAddress: { name: string | null; address1: string | null; address2: string | null; city: string | null; province: string | null; provinceCode: string | null; zip: string | null; country: string | null; phone: string | null } | null;
   totalPriceSet: Money;
   subtotalPriceSet: Money | null;
   totalDiscountsSet: Money | null;
@@ -138,19 +139,21 @@ type OrderNode = {
       quantity: number;
       currentQuantity: number;
       unfulfilledQuantity: number;
+      taxLines: Array<{ title: string; ratePercentage: number | null; priceSet: Money }>;
       variant: { id: string } | null;
       product: { id: string } | null;
       originalUnitPriceSet: Money;
       totalDiscountSet: Money;
+      discountAllocations?: Array<{ allocatedAmountSet: Money }>;
     }>;
   };
 };
 
 const ORDER_FIELDS = `
   id name createdAt updatedAt processedAt cancelledAt cancelReason closedAt
-  displayFinancialStatus displayFulfillmentStatus tags note email phone paymentGatewayNames
+  displayFinancialStatus displayFulfillmentStatus tags note email phone paymentGatewayNames taxesIncluded
   shippingAddress { name address1 address2 city province provinceCode zip country phone }
-  billingAddress { name }
+  billingAddress { name address1 address2 city province provinceCode zip country phone }
   totalPriceSet { shopMoney { amount currencyCode } }
   subtotalPriceSet { shopMoney { amount } }
   totalDiscountsSet { shopMoney { amount } }
@@ -161,9 +164,11 @@ const ORDER_FIELDS = `
   lineItems(first: 250) {
     nodes {
       id title variantTitle sku quantity currentQuantity unfulfilledQuantity
+      taxLines { title ratePercentage priceSet { shopMoney { amount } } }
       variant { id } product { id }
       originalUnitPriceSet { shopMoney { amount } }
       totalDiscountSet { shopMoney { amount } }
+      discountAllocations { allocatedAmountSet { shopMoney { amount } } }
     }
   }
 `;
@@ -198,7 +203,7 @@ type ProductNode = {
   productType: string | null;
   status: string;
   featuredMedia: { preview: { image: { url: string } | null } | null } | null;
-  variants: { nodes: Array<{ id: string; title: string; sku: string | null; price: string; inventoryQuantity: number | null; image: { url: string } | null; inventoryItem: { id: string; tracked: boolean } | null }> };
+  variants: { nodes: Array<{ id: string; title: string; sku: string | null; price: string; inventoryQuantity: number | null; image: { url: string } | null; inventoryItem: { id: string; tracked: boolean; harmonizedSystemCode: string | null } | null }> };
 };
 
 async function* iterateProducts(auth: StoreAuth) {
@@ -211,7 +216,7 @@ async function* iterateProducts(auth: StoreAuth) {
           nodes {
             id title productType status
             featuredMedia { preview { image { url } } }
-            variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } inventoryItem { id tracked } } }
+            variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } inventoryItem { id tracked harmonizedSystemCode } } }
           }
         }
       }`,
@@ -226,7 +231,7 @@ async function* iterateProducts(auth: StoreAuth) {
 
 export async function fetchProductById(numericId: string, auth: StoreAuth): Promise<ProductNode | null> {
   const data: { product: ProductNode | null } = await shopifyGraphQL(
-    `query Product($id: ID!) { product(id: $id) { id title productType status featuredMedia { preview { image { url } } } variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } inventoryItem { id tracked } } } } }`,
+    `query Product($id: ID!) { product(id: $id) { id title productType status featuredMedia { preview { image { url } } } variants(first: 100) { nodes { id title sku price inventoryQuantity image { url } inventoryItem { id tracked harmonizedSystemCode } } } } }`,
     { id: `gid://shopify/Product/${numericId}` },
     auth,
   );
@@ -256,6 +261,7 @@ export async function upsertProductFromShopify(node: ProductNode, auth: StoreAut
       shopifyQty: v.inventoryQuantity ?? null,
       shopifyInventoryItemId: gidToId(v.inventoryItem?.id) ?? null,
       shopifyTracked: v.inventoryItem?.tracked ?? null,
+      hsnCode: v.inventoryItem?.harmonizedSystemCode?.trim() || null,
       source: "shopify" as const,
       active: node.status === "ACTIVE",
     };
@@ -276,6 +282,8 @@ export async function upsertProductFromShopify(node: ProductNode, auth: StoreAut
           shopifyQty: values.shopifyQty,
           shopifyInventoryItemId: values.shopifyInventoryItemId,
           shopifyTracked: values.shopifyTracked,
+          // an HSN code typed in here survives syncs when Shopify has none
+          hsnCode: sql`coalesce(excluded.hsn_code, ${products.hsnCode})`,
           active: values.active,
         },
       });
@@ -293,9 +301,11 @@ function mapLines(node: OrderNode): ShopifyLine[] {
     variantId: gidToId(li.variant?.id),
     productId: gidToId(li.product?.id),
     quantity: li.currentQuantity ?? li.quantity,
+    originalQuantity: li.quantity,
     fulfilledQty: Math.max(0, (li.currentQuantity ?? li.quantity) - (li.unfulfilledQuantity ?? 0)),
     priceP: money(li.originalUnitPriceSet),
-    discountP: money(li.totalDiscountSet),
+    discountP: li.discountAllocations ? li.discountAllocations.reduce((sum, d) => sum + money(d.allocatedAmountSet), 0) : money(li.totalDiscountSet),
+    taxLines: (li.taxLines ?? []).map((t) => ({ title: t.title, ratePct: Number(t.ratePercentage ?? 0), amountP: money(t.priceSet) })),
   }));
 }
 
@@ -318,6 +328,8 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
     email: node.email,
     phone: node.phone ?? node.shippingAddress?.phone ?? null,
     shippingAddress: node.shippingAddress ?? null,
+    billingAddress: node.billingAddress ?? null,
+    taxesIncluded: node.taxesIncluded ?? true,
     city: node.shippingAddress?.city ?? null,
     province: node.shippingAddress?.province ?? null,
     totalP: money(node.totalPriceSet),
@@ -341,6 +353,7 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
   };
 
   await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`order:${id}`}, 0))`);
     const [existing] = await tx.select().from(shopifyOrders).where(eq(shopifyOrders.id, id)).for("update");
     const cancelled = !!node.cancelledAt || node.displayFinancialStatus === "VOIDED";
 
@@ -387,6 +400,7 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
       await tx.insert(businessRecords).values({
         entityId: auth.entityId,
         kind: "sale",
+        brandId: auth.brandId,
         workDate,
         amountP: row.totalP,
         channel: auth.channel,
@@ -402,7 +416,7 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
     } else if (!sale.voidedAt) {
       await tx
         .update(businessRecords)
-        .set({ amountP: row.totalP, workDate, reference: node.name, paymentMethod: isCod ? "cod" : "gateway", paymentTerms: paid ? "paid" : "credit" })
+        .set({ brandId: auth.brandId, amountP: row.totalP, workDate, reference: node.name, paymentMethod: isCod ? "cod" : "gateway", paymentTerms: paid ? "paid" : "credit" })
         .where(eq(businessRecords.id, sale.id));
     }
 
@@ -416,6 +430,7 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
           .values({
             entityId: auth.entityId,
             kind: "return",
+            brandId: auth.brandId,
             workDate: toYmd(new Date(refund.createdAt)),
             amountP: amount,
             channel: auth.channel,
@@ -433,7 +448,7 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
 
     for (const mv of plan.moves) {
       const [p] = await tx.select({ id: products.id }).from(products).where(eq(products.shopifyVariantId, mv.variantId)).limit(1);
-      if (!p) continue;
+      if (!p) throw new Error(`Cannot update stock for ${node.name}: ${mv.title} is not mapped to a product. Sync products and retry this order.`);
       if (mv.qty < 0) await adjustStock(tx, { productId: p.id, kind: "sale_out", qty: mv.qty, refType: "shopify_order", refId: node.name, note: `Website order ${node.name}`, allowNegative: true });
       else await adjustStock(tx, { productId: p.id, kind: "return_in", qty: mv.qty, refType: "shopify_order", refId: node.name, note: `Restocked from ${node.name}` });
     }

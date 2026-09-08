@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { eq, inArray } from "drizzle-orm";
-import { ExternalLink, Truck } from "lucide-react";
+import { and, eq, inArray, isNull } from "drizzle-orm";
+import { ExternalLink, Printer, Truck } from "lucide-react";
 import { createDispatchFromOrder } from "@/actions/dispatch";
 import { db } from "@/db";
-import { businessRecords, dispatches, products, shopifyOrders } from "@/db/schema";
+import { businessRecords, dispatches, invoices, products, shopifyOrders } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
 import { formatDateTime } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
@@ -30,10 +30,11 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
   const [o] = await db.select().from(shopifyOrders).where(eq(shopifyOrders.id, id)).limit(1);
   if (!o) notFound();
   const variantIds = o.lineItems.map((l) => l.variantId).filter((v): v is string => !!v);
-  const [matched, dsp, records] = await Promise.all([
+  const [matched, dsp, records, [invoice]] = await Promise.all([
     variantIds.length ? db.select({ id: products.id, shopifyVariantId: products.shopifyVariantId, stockQty: products.stockQty }).from(products).where(inArray(products.shopifyVariantId, variantIds)) : Promise.resolve([]),
     db.select().from(dispatches).where(eq(dispatches.shopifyOrderId, id)).limit(1),
     db.select().from(businessRecords).where(eq(businessRecords.shopifyOrderId, id)),
+    db.select({ id: invoices.id, number: invoices.number }).from(invoices).where(and(eq(invoices.shopifyOrderId, id), isNull(invoices.voidedAt))).limit(1),
   ]);
   const byVariant = new Map(matched.map((m) => [m.shopifyVariantId!, m]));
   const orderedUnits = o.lineItems.reduce((s, l) => s + l.quantity, 0);
@@ -61,6 +62,13 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
         backLabel="Website orders"
       >
         {editable ? <SyncButton orderId={o.id} label="Refresh" variant="ghost" /> : null}
+        {invoice ? (
+          <Link href={`/print/invoice/${invoice.id}`} target="_blank" className={buttonVariants({ variant: "outline", size: "sm" })}>
+            <Printer /> Invoice {invoice.number}
+          </Link>
+        ) : editable && !o.cancelledAt ? (
+          <Link href={`/print/invoice/preview?source=order&id=${o.id}`} className={buttonVariants({ variant: "outline", size: "sm" })}>Review invoice</Link>
+        ) : null}
         {editable && openForFulfilment ? <FulfilDialog orderId={o.id} orderName={o.name} canFulfil={canFulfil} /> : null}
         {adminUrl ? (
           <a href={adminUrl} target="_blank" rel="noreferrer" className={buttonVariants({ variant: "outline", size: "sm" })}>

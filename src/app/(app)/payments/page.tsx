@@ -45,8 +45,8 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
       .leftJoin(bankAccounts, eq(bankAccounts.id, payments.bankAccountId))
       .where(and(gte(payments.workDate, from), lte(payments.workDate, to), entity === "all" ? undefined : eq(payments.entityId, entity)))
       .orderBy(desc(payments.workDate), desc(payments.createdAt)),
-    accountBalances(),
-    outstandingLists(),
+    accountBalances(entity),
+    outstandingLists(entity),
     getContacts(),
   ]);
   const live = rows.filter((r) => !r.p.voidedAt);
@@ -61,7 +61,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
 
   return (
     <>
-      <PageHeader title="Payments" description="Money received from customers, money paid to suppliers, and where it sits.">
+      <PageHeader title="Payments" description="Money received from customers, supplier payments, customer refunds, and cash or bank balances.">
         {editable ? (
           <>
             <PaymentDialog direction="in" contacts={contactOptions} accounts={accountOptions} entities={entityOptions} date={today} defaultEntity={entity === "all" ? "brand" : entity} />
@@ -72,7 +72,7 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
       <StatGrid className="mb-5">
         <Stat label="Cash & bank" value={formatINR(cash)} hint="all active accounts" tone="primary" />
         <Stat label="Customers owe" value={formatINR(recvTotal)} hint={`${outstanding.receivables.length} customers`} />
-        <Stat label="We owe" value={formatINR(payTotal)} hint={`${outstanding.payables.length} suppliers`} tone={payTotal > 0 ? "warning" : "default"} />
+        <Stat label="We owe" value={formatINR(payTotal)} hint={`${outstanding.payables.length} contacts`} tone={payTotal > 0 ? "warning" : "default"} />
         <Stat label={`Net this month`} value={formatINR(inTotal - outTotal)} hint={`in ${formatINR(inTotal)} · out ${formatINR(outTotal)}`} />
       </StatGrid>
       <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
@@ -215,15 +215,15 @@ export default async function PaymentsPage(props: PageProps<"/payments">) {
                 <TableEmpty colSpan={4}>{tab === "receivables" ? "No customer owes anything. Credit sales with a customer selected show up here." : "Nothing outstanding. Credit bills with a supplier selected show up here."}</TableEmpty>
               ) : (
                 (tab === "receivables" ? outstanding.receivables : outstanding.payables).map((c) => (
-                  <TableRow key={c.id}>
-                    <TableCell className="font-medium">{c.name}</TableCell>
+                  <TableRow key={`${c.entityId}:${c.id}`}>
+                    <TableCell className="font-medium">{c.name}<span className="block text-xs text-muted-foreground">{nameOf(c.entityId)}</span></TableCell>
                     <TableCell className="hidden sm:table-cell">{c.phone ?? "—"}</TableCell>
                     <TableCell className="text-right">
                       <Amount paise={c.amount} tone={tab === "receivables" ? "in" : "out"} className="font-semibold" />
                     </TableCell>
                     {editable ? (
                       <TableCell className="text-right">
-                        <PaymentDialog direction={tab === "receivables" ? "in" : "out"} contacts={contactOptions} accounts={accountOptions} entities={entityOptions} date={today} defaultEntity="brand" defaultContactId={c.id} trigger={<Button variant="outline" size="xs" />} triggerLabel={tab === "receivables" ? "Record receipt" : "Record payment"} />
+                        <PaymentDialog direction={tab === "receivables" ? "in" : "out"} contacts={contactOptions} accounts={accountOptions} entities={entityOptions} date={today} defaultEntity={c.entityId} defaultContactId={c.id} trigger={<Button variant="outline" size="xs" />} triggerLabel={tab === "receivables" ? "Record receipt" : "Record payment"} />
                       </TableCell>
                     ) : null}
                   </TableRow>

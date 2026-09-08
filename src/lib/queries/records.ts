@@ -4,6 +4,7 @@ import { db } from "@/db";
 import { businessRecords, contacts, users, type RecordKind } from "@/db/schema";
 
 export type RecordFilters = {
+  brand?: string;
   entity?: string; // brand | factory | all
   kind?: string; // sale | expense | return | purchase | all
   from?: string;
@@ -17,6 +18,8 @@ export type RecordFilters = {
 
 function whereFor(f: RecordFilters) {
   const conds = [];
+  if (f.brand === "unassigned") conds.push(isNull(businessRecords.brandId));
+  else if (f.brand && f.brand !== "all") conds.push(eq(businessRecords.brandId, f.brand));
   if (f.entity && f.entity !== "all") conds.push(eq(businessRecords.entityId, f.entity));
   if (f.kind && f.kind !== "all") conds.push(eq(businessRecords.kind, f.kind as RecordKind));
   if (f.from) conds.push(gte(businessRecords.workDate, f.from));
@@ -53,7 +56,7 @@ export async function listRecords(f: RecordFilters) {
 
 export type MoneyTotals = Record<RecordKind, { total: number; count: number }>;
 
-export async function totalsByKind(f: Pick<RecordFilters, "entity" | "from" | "to" | "channel">): Promise<MoneyTotals> {
+export async function totalsByKind(f: Pick<RecordFilters, "entity" | "brand" | "from" | "to" | "channel">): Promise<MoneyTotals> {
   const rows = await db
     .select({ kind: businessRecords.kind, total: sql<number>`coalesce(sum(${businessRecords.amountP}), 0)::float8`, n: sql<number>`count(*)::int` })
     .from(businessRecords)

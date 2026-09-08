@@ -20,11 +20,16 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
   if (!canView(user.role, mod)) return new Response("Not allowed", { status: 403 });
   const sp = new URL(request.url).searchParams;
   const month = /^\d{4}-\d{2}$/.test(sp.get("month") ?? "") ? sp.get("month")! : monthKey();
-  const [from, to] = monthRange(month);
+  const [monthFrom, monthTo] = monthRange(month);
+  const from = sp.get("from") ?? monthFrom, to = sp.get("to") ?? monthTo;
+  const validDate = (v: string) => /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v)) && new Date(v).toISOString().slice(0, 10) === v;
+  if (!validDate(from) || !validDate(to) || from > to) return new Response("Choose a valid date range", { status: 400 });
+  const periodLabel = sp.has("from") ? `${from}-to-${to}` : month;
 
   if (report === "records") {
-    const { rows } = await listRecords({
+    const { rows, total } = await listRecords({
       entity: str(sp.get("entity")) || "all",
+      brand: str(sp.get("brand")) || "all",
       kind: pick(sp.get("kind"), ["all", "sale", "expense", "return", "purchase"], "all"),
       from,
       to,
@@ -32,14 +37,16 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
       includeVoided: sp.get("voided") === "1",
       pageSize: 5000,
     });
+    if (total > rows.length) return new Response("This export has more than 5000 entries. Choose a smaller date range to download every row.", { status: 400 });
     return csvResponse(
-      `records-${month}.csv`,
+      `records-${periodLabel}.csv`,
       toCsv(
         rows.map(({ record: r, contactName, userName }) => ({
           date: r.workDate,
           number: r.number,
           type: r.kind,
           books: r.entityId,
+          brand: r.brandId ?? "Shared / unassigned",
           amount: toRupees(r.amountP),
           channel: r.channel,
           category: r.category,
@@ -69,7 +76,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
     return csvResponse(`materials.csv`, toCsv(rows.map((m) => ({ code: m.code, material: m.name, unit: m.unit, in_stock: m.qty, minimum: m.minQty, unit_cost: toRupees(m.costP), value: toRupees(Math.round(m.qty * m.costP)) }))));
   }
   if (report === "orders") {
-    const rows = await db.select().from(shopifyOrders).orderBy(desc(shopifyOrders.createdAtShop)).limit(5000);
+    const rows = await db.select().from(shopifyOrders).where(and(sp.get("brand") && sp.get("brand")!=="all" ? eq(shopifyOrders.brandId,sp.get("brand")!) : undefined, sp.get("store") && sp.get("store")!=="all" ? eq(shopifyOrders.shop,sp.get("store")!) : undefined)).orderBy(desc(shopifyOrders.createdAtShop)).limit(5000);
     return csvResponse(
       `website-orders.csv`,
       toCsv(
@@ -84,7 +91,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
       .innerJoin(products, eq(products.id, productionEntries.productId))
       .where(and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to), isNull(productionEntries.voidedAt)))
       .orderBy(asc(productionEntries.workDate));
-    return csvResponse(`production-${month}.csv`, toCsv(rows.map(({ e, name, variant }) => ({ date: e.workDate, number: e.number, product: name, variant, brand: e.brandId, qty: e.qty, worker: e.workerName ?? "", material_cost: toRupees(e.materialCostP), note: e.note ?? "" }))));
+    return csvResponse(`production-${periodLabel}.csv`, toCsv(rows.map(({ e, name, variant }) => ({ date: e.workDate, number: e.number, product: name, variant, brand: e.brandId, qty: e.qty, worker: e.workerName ?? "", material_cost: toRupees(e.materialCostP), note: e.note ?? "" }))));
   }
   if (report === "attendance") {
     const rows = await db
@@ -93,7 +100,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
       .innerJoin(employees, eq(employees.id, attendance.employeeId))
       .where(and(gte(attendance.workDate, from), lte(attendance.workDate, to)))
       .orderBy(asc(attendance.workDate), asc(employees.code));
-    return csvResponse(`attendance-${month}.csv`, toCsv(rows.map(({ a, code, name }) => ({ date: a.workDate, code, name, status: a.status, check_in: a.checkIn ?? "", check_out: a.checkOut ?? "", overtime_min: a.overtimeMin, note: a.note ?? "" }))));
+    return csvResponse(`attendance-${periodLabel}.csv`, toCsv(rows.map(({ a, code, name }) => ({ date: a.workDate, code, name, status: a.status, check_in: a.checkIn ?? "", check_out: a.checkOut ?? "", overtime_min: a.overtimeMin, note: a.note ?? "" }))));
   }
   return new Response("Unknown report", { status: 404 });
 }

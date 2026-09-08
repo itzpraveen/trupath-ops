@@ -20,7 +20,7 @@ export default async function EmployeesPage() {
 
   return (
     <>
-      <PageHeader title="Staff" description="People who work at the factory. Attendance and wages are tracked per person." backHref="/factory" backLabel="Daily register">
+      <PageHeader title="Staff" description="Factory and office staff. Job roles describe their work; login access is managed separately." backHref="/factory" backLabel="Daily register">
         {editable ? <EmployeeDialog designations={names} nextCode={nextCode} /> : null}
       </PageHeader>
       <TableCard>
@@ -29,7 +29,7 @@ export default async function EmployeesPage() {
             <TableRow>
               <TableHead>Code</TableHead>
               <TableHead>Name</TableHead>
-              <TableHead>Role</TableHead>
+              <TableHead>Job role</TableHead>
               <TableHead className="hidden sm:table-cell">Phone</TableHead>
               <TableHead className="hidden md:table-cell">Joined</TableHead>
               <TableHead className="text-right">Daily wage</TableHead>
@@ -39,7 +39,7 @@ export default async function EmployeesPage() {
           </TableHeader>
           <TableBody>
             {staff.length === 0 ? (
-              <TableEmpty colSpan={8}>No staff yet. Add the people who work at the factory.</TableEmpty>
+              <TableEmpty colSpan={8}>No staff yet. Add your factory and office team.</TableEmpty>
             ) : (
               staff.map((s) => (
                 <TableRow key={s.id} className={s.active ? "" : "opacity-60"}>

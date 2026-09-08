@@ -86,6 +86,7 @@ export function ProductPicker({
             value={query}
             autoFocus={autoFocus}
             placeholder={placeholder}
+            aria-label={placeholder}
             className="h-9 w-full rounded-lg border border-input bg-transparent pl-8 pr-2.5 text-base outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/50 md:text-sm dark:bg-input/30"
             onChange={(e) => {
               setQuery(e.target.value);
@@ -121,10 +122,8 @@ export function ProductPicker({
               key={p.id}
               role="option"
               aria-selected={i === active}
-              onMouseDown={(e) => {
-                e.preventDefault();
-                choose(p);
-              }}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => choose(p)}
               onMouseEnter={() => setActive(i)}
               className={cn("flex cursor-pointer items-center justify-between gap-2 rounded-md px-2.5 py-1.5 text-sm", i === active && "bg-muted")}
             >

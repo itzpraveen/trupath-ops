@@ -84,6 +84,12 @@ export const entities = pgTable("entities", {
   stateCode: text(),
   phone: text(),
   email: text(),
+  /** Series prefix for tax invoices, e.g. B2C -> B2C/611/26-27. Buyers with a GSTIN use B2B. */
+  invoicePrefix: text().notNull().default("B2C"),
+  shippingHsn: text(),
+  shippingTaxTreatment: text().$type<"goods" | "separate">().notNull().default("goods"),
+  eInvoiceStatus: text().$type<"unconfirmed" | "required" | "not_required">().notNull().default("unconfirmed"),
+  eInvoiceReview: text(),
   sortOrder: integer().notNull().default(0),
 });
 
@@ -156,6 +162,9 @@ export const products = pgTable(
     priceP: money(),
     costP: money(),
     unit: text().notNull().default("pcs"),
+    /** For tax invoices: HSN code and GST rate in percent (prices include tax). */
+    hsnCode: text(),
+    gstRate: numeric({ precision: 5, scale: 2, mode: "number" }),
     stockQty: integer().notNull().default(0),
     minStock: integer().notNull().default(0),
     shopifyQty: integer(),
@@ -417,6 +426,7 @@ export const businessRecords = pgTable(
     entityId: text()
       .notNull()
       .references(() => entities.id),
+    brandId: text().references(() => brands.id),
     kind: text().$type<RecordKind>().notNull(),
     workDate: date().notNull(),
     amountP: money(),
@@ -441,6 +451,7 @@ export const businessRecords = pgTable(
   },
   (t) => [
     index("records_entity_date_idx").on(t.entityId, t.workDate),
+    index("records_brand_date_idx").on(t.brandId, t.workDate),
     index("records_kind_idx").on(t.kind),
     index("records_shopify_idx").on(t.shopifyOrderId),
   ],
@@ -496,12 +507,16 @@ export type ShopifyLine = {
   variantId: string | null;
   productId: string | null;
   quantity: number;
+  /** Original invoiced quantity, including subsequently refunded units. */
+  originalQuantity?: number;
   priceP: number;
   discountP: number;
   /** Units Shopify reports as fulfilled (split shipments fulfil a line in parts). */
   fulfilledQty?: number;
   /** Units already taken out of finished stock for this line, by the order sync or a dispatch in this app. */
   deductedQty?: number;
+  /** Tax Shopify charged on the line (e.g. IGST 5%, or CGST 2.5% + SGST 2.5%). */
+  taxLines?: Array<{ title: string; ratePct: number; amountP: number }>;
 };
 
 export const shopifyOrders = pgTable(
@@ -518,6 +533,8 @@ export const shopifyOrders = pgTable(
     email: text(),
     phone: text(),
     shippingAddress: jsonb().$type<Record<string, string | null>>(),
+    billingAddress: jsonb().$type<Record<string, string | null>>(),
+    taxesIncluded: boolean().notNull().default(true),
     city: text(),
     province: text(),
     totalP: money(),
@@ -633,7 +650,89 @@ export const dispatchItems = pgTable("dispatch_items", {
     .notNull()
     .references(() => products.id),
   qty: integer().notNull(),
+  /** Agreed selling price including GST, fixed when the sale is entered. */
+  unitPriceP: bigint({ mode: "number" }),
 });
+
+/* ------------------------------------------------------------------ */
+/* Tax invoices (immutable snapshots; numbers are never reused)        */
+/* ------------------------------------------------------------------ */
+
+export type InvoiceLineRow = {
+  productId?: string;
+  description: string;
+  hsn: string;
+  ratePct: number;
+  qty: number;
+  unit: string;
+  inclP: number;
+  taxP: number;
+  taxableP: number;
+  unitInclP: number;
+  unitExclP: number;
+};
+
+export type InvoiceSeller = { legalName: string; gstin: string; address: string; stateCode: string; phone: string | null; email: string | null };
+
+export const invoices = pgTable(
+  "invoices",
+  {
+    id: id(),
+    number: text().notNull(),
+    sellerGstin: text().notNull(),
+    seller: jsonb().$type<InvoiceSeller>().notNull(),
+    entityId: text()
+      .notNull()
+      .references(() => entities.id),
+    issuedOn: date().notNull(),
+    customerName: text().notNull(),
+    customerAddress: text().notNull().default(""),
+    customerPhone: text(),
+    customerEmail: text(),
+    customerGstin: text(),
+    customerStateCode: text().notNull(),
+    supplyStateCode: text().notNull(),
+    deliveryAddress: text(),
+    lines: jsonb().$type<InvoiceLineRow[]>().notNull().default(sql`'[]'::jsonb`),
+    taxableP: money(),
+    cgstP: money(),
+    sgstP: money(),
+    igstP: money(),
+    roundOffP: money(),
+    totalP: money(),
+    orderRef: text(),
+    dispatchNumber: text(),
+    courier: text(),
+    trackingNo: text(),
+    destination: text(),
+    paymentTerms: text(),
+    shopifyOrderId: text(),
+    dispatchId: uuid(),
+    recordId: uuid(),
+    userId: uuid().references(() => users.id),
+    createdAt: createdAt(),
+    voidedAt: timestamp({ withTimezone: true }),
+    voidReason: text(),
+  },
+  (t) => [uniqueIndex("invoices_gstin_number_unique").on(t.sellerGstin, t.number), uniqueIndex("invoices_live_order_unique").on(t.shopifyOrderId).where(sql`${t.voidedAt} is null`), uniqueIndex("invoices_live_dispatch_unique").on(t.dispatchId).where(sql`${t.voidedAt} is null`), index("invoices_order_idx").on(t.shopifyOrderId), index("invoices_dispatch_idx").on(t.dispatchId), index("invoices_entity_date_idx").on(t.entityId, t.issuedOn)],
+);
+export type Invoice = typeof invoices.$inferSelect;
+
+export type CreditNoteLine = InvoiceLineRow & { originalLine: number; restockQty: number };
+export const creditNotes = pgTable("credit_notes", {
+  id: id(),
+  invoiceId: uuid().notNull().references(() => invoices.id),
+  requestId: uuid().notNull().unique(),
+  number: text().notNull(),
+  sellerGstin: text().notNull(),
+  issuedOn: date().notNull(),
+  reason: text().notNull(),
+  lines: jsonb().$type<CreditNoteLine[]>().notNull(),
+  taxableP: money(), cgstP: money(), sgstP: money(), igstP: money(), roundOffP: money(), totalP: money(),
+  recordId: uuid().notNull().references(() => businessRecords.id),
+  userId: uuid().notNull().references(() => users.id),
+  createdAt: createdAt(),
+}, (t) => [uniqueIndex("credit_notes_gstin_number_unique").on(t.sellerGstin, t.number), index("credit_notes_invoice_idx").on(t.invoiceId)]);
 
 export type UploadKind = "dispatch_photo" | "jobwork_file" | "expense_bill";
 export const uploads = pgTable(

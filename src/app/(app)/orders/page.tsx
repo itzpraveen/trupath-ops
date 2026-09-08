@@ -8,7 +8,8 @@ import { shopifyOrders } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
 import { formatDateTime, monthRange, monthKey } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
-import { canEdit } from "@/lib/permissions";
+import { canEdit, canView } from "@/lib/permissions";
+import { getBrands } from "@/lib/queries/common";
 import { ordersSummary } from "@/lib/queries/dashboard";
 import { getLastSync, isShopifyConfigured } from "@/lib/shopify";
 import { listStores } from "@/lib/shopify-oauth";
@@ -45,7 +46,8 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
   const sp = await props.searchParams;
   const configured = await isShopifyConfigured();
   const status = pick(sp.status, ["all", "toship", "shipped", "cancelled"], "toship");
-  const stores = await listStores();
+  const [stores,brands] = await Promise.all([listStores(),getBrands()]);
+  const brand=pick(sp.brand,["all",...brands.map(b=>b.id)],"all");
   const storeShop = pick(sp.store, ["all", ...stores.map((s) => s.shop)], "all");
   const q = str(sp.q, 80);
   const page = int(sp.page);
@@ -69,6 +71,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
   }
 
   const where = and(
+    brand === "all" ? undefined : eq(shopifyOrders.brandId,brand),
     status === "toship" ? and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`) : status === "shipped" ? sql`${shopifyOrders.fulfillmentStatus} = 'FULFILLED'` : status === "cancelled" ? isNotNull(shopifyOrders.cancelledAt) : undefined,
     q ? or(ilike(shopifyOrders.name, `%${q}%`), ilike(shopifyOrders.customerName, `%${q}%`), ilike(shopifyOrders.phone, `%${q}%`), ilike(shopifyOrders.email, `%${q}%`), ilike(shopifyOrders.city, `%${q}%`)) : undefined,
     storeShop === "all" ? undefined : eq(shopifyOrders.shop, storeShop),
@@ -78,25 +81,26 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
   const [rows, [{ total }], summary, sync] = await Promise.all([
     db.select().from(shopifyOrders).where(where).orderBy(desc(shopifyOrders.createdAtShop)).limit(PAGE).offset((page - 1) * PAGE),
     db.select({ total: count() }).from(shopifyOrders).where(where),
-    ordersSummary(new Date(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) + "T00:00:00+05:30"), mFrom, mTo),
+    ordersSummary(new Date(new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }) + "T00:00:00+05:30"), mFrom, mTo, "all", brand, canView(user.role,"sales"), storeShop),
     getLastSync(),
   ]);
-  const params = { status, q: q || undefined, store: storeShop === "all" ? undefined : storeShop };
+  const params = { status, brand, q: q || undefined, store: storeShop === "all" ? undefined : storeShop };
   const pages = Math.max(1, Math.ceil(Number(total) / PAGE));
 
   return (
     <>
       <PageHeader title="Website orders" description={sync.lastOk ? `Last synced ${formatDateTime(sync.lastOk.startedAt)}${sync.last?.status === "error" ? ` · last attempt failed: ${sync.last.message}` : ""}` : "Not synced yet. Run the first sync to pull recent orders."}>
         {editable ? <SyncButton /> : null}
-        <Link href="/api/export/orders" className={buttonVariants({ variant: "outline", size: "sm" })}>
+        <Link href={`/api/export/orders${qs({brand,store:storeShop})}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Download /> Export CSV
         </Link>
       </PageHeader>
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-sm"><span className="font-medium">Brand</span>{[["all","All brands"],...brands.map(b=>[b.id,b.name])].map(([id,name])=><Link key={id} href={`/orders${qs({...params,brand:id,store:undefined})}`} className={cn("rounded-full border px-3 py-1",brand===id ? "bg-foreground text-background":"bg-card")}>{name}</Link>)}</div>
       <StatGrid className="mb-5">
         <Stat label="Waiting to ship" value={summary.open} tone={summary.open ? "warning" : "default"} />
         <Stat label="Today" value={summary.today} />
         <Stat label="This month" value={summary.monthCount} hint="orders" />
-        <Stat label="Revenue this month" value={formatINR(summary.monthTotal)} />
+        {canView(user.role,"sales") ? <Stat label="Revenue this month" value={formatINR(summary.monthTotal)} /> : null}
       </StatGrid>
       {stores.length > 1 ? (
         <div className="mb-3 flex flex-wrap items-center gap-1 text-sm">
@@ -121,7 +125,7 @@ export default async function OrdersPage(props: PageProps<"/orders">) {
           ))}
         </div>
         <form className="flex items-center gap-2" action="/orders">
-          <input type="hidden" name="status" value={status} />
+          <input type="hidden" name="brand" value={brand} /><input type="hidden" name="status" value={status} />
           {storeShop !== "all" ? <input type="hidden" name="store" value={storeShop} /> : null}
           <Input name="q" defaultValue={q} placeholder="Order no., name, phone, city…" className="w-56" />
           <Button type="submit" variant="outline" size="sm">

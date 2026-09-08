@@ -43,6 +43,48 @@
       "when": 1788855101136,
       "tag": "0005_material_movement_date",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1788857200938,
+      "tag": "0006_tax_invoices",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1788860237101,
+      "tag": "0007_invoice_safeguards",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1788861230544,
+      "tag": "0008_invoice_place_of_supply",
+      "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1788862504156,
+      "tag": "0009_shipping_tax_classification",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1788864416637,
+      "tag": "0010_credit_notes_and_gst_review",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1788865185544,
+      "tag": "0011_record_brands",
+      "breakpoints": true
     }
   ]
 }

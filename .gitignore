@@ -47,3 +47,6 @@ next-env.d.ts
 
 # e2e screenshots
 e2e-shots/
+
+# Local review artifacts
+/output/

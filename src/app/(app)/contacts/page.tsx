@@ -5,7 +5,7 @@ import { cn } from "cn";
 import { db } from "@/db";
 import { contacts } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
-import { canEdit } from "@/lib/permissions";
+import { canEdit, canView } from "@/lib/permissions";
 import { outstandingByContact } from "@/lib/queries/money";
 import { pick, qs, str } from "@/lib/url";
 import { Button } from "@/components/ui/button";
@@ -30,8 +30,9 @@ export default async function ContactsPage(props: PageProps<"/contacts">) {
       .from(contacts)
       .where(and(showAll ? undefined : eq(contacts.active, true), type === "all" ? undefined : eq(contacts.type, type), q ? or(ilike(contacts.name, `%${q}%`), ilike(contacts.phone, `%${q}%`), ilike(contacts.email, `%${q}%`), ilike(contacts.gstin, `%${q}%`)) : undefined))
       .orderBy(asc(contacts.name)),
-    outstandingByContact(),
+    canView(user.role, "payments") ? outstandingByContact() : Promise.resolve(new Map()),
   ]);
+  const showBalances = canView(user.role, "payments");
   const editable = canEdit(user.role, "contacts");
   const params = { type, q: q || undefined, all: showAll ? "1" : undefined };
 
@@ -73,8 +74,7 @@ export default async function ContactsPage(props: PageProps<"/contacts">) {
               <TableHead className="hidden sm:table-cell">Phone</TableHead>
               <TableHead className="hidden md:table-cell">GSTIN</TableHead>
               <TableHead className="hidden lg:table-cell">Address</TableHead>
-              <TableHead className="text-right">They owe</TableHead>
-              <TableHead className="text-right">We owe</TableHead>
+              {showBalances ? <><TableHead className="text-right">They owe</TableHead><TableHead className="text-right">We owe</TableHead></> : null}
               {editable ? <TableHead className="w-16" /> : null}
             </TableRow>
           </TableHeader>
@@ -83,7 +83,7 @@ export default async function ContactsPage(props: PageProps<"/contacts">) {
               <TableEmpty colSpan={8}>No contacts yet. Add wholesale customers, fabric suppliers and stitching units.</TableEmpty>
             ) : (
               rows.map((c) => {
-                const o = outstanding.get(c.id);
+                const o = [...outstanding.values()].filter((b) => b.contactId === c.id).reduce((sum, b) => ({ receivable: sum.receivable + Math.max(0, b.receivable), payable: sum.payable + Math.max(0, b.payable) }), { receivable: 0, payable: 0 });
                 return (
                   <TableRow key={c.id} className={cn(!c.active && "opacity-60")}>
                     <TableCell className="font-medium">
@@ -94,8 +94,8 @@ export default async function ContactsPage(props: PageProps<"/contacts">) {
                     <TableCell className="hidden sm:table-cell">{c.phone ?? "—"}</TableCell>
                     <TableCell className="hidden text-xs md:table-cell">{c.gstin ?? "—"}</TableCell>
                     <TableCell className="hidden max-w-56 truncate text-xs text-muted-foreground lg:table-cell">{c.address ?? ""}</TableCell>
-                    <TableCell className="text-right">{o && o.receivable > 0 ? <Amount paise={o.receivable} tone="in" /> : <span className="text-muted-foreground">—</span>}</TableCell>
-                    <TableCell className="text-right">{o && o.payable > 0 ? <Amount paise={o.payable} tone="out" /> : <span className="text-muted-foreground">—</span>}</TableCell>
+                    {showBalances ? <><TableCell className="text-right">{o && o.receivable > 0 ? <Amount paise={o.receivable} tone="in" /> : <span className="text-muted-foreground">—</span>}</TableCell>
+                    <TableCell className="text-right">{o && o.payable > 0 ? <Amount paise={o.payable} tone="out" /> : <span className="text-muted-foreground">—</span>}</TableCell></> : null}
                     {editable ? (
                       <TableCell className="text-right">
                         <ContactDialog contact={c} />

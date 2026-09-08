@@ -1,10 +1,10 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { Pencil, Printer } from "lucide-react";
 import { db } from "@/db";
-import { dispatchItems, dispatches, products, shopifyOrders, uploads } from "@/db/schema";
+import { dispatchItems, dispatches, invoices, products, shopifyOrders, uploads } from "@/db/schema";
 import { FULFIL_SCOPE, getStoreByShop, hasScope } from "@/lib/shopify-oauth";
 import { requireUser } from "@/lib/auth";
 import { formatDate, formatDateTime, todayIST } from "@/lib/dates";
@@ -28,10 +28,15 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
   if (!/^[0-9a-f-]{36}$/i.test(id)) notFound();
   const [d] = await db.select().from(dispatches).where(eq(dispatches.id, id)).limit(1);
   if (!d) notFound();
-  const [items, photos, brands] = await Promise.all([
+  const [items, photos, brands, [invoice]] = await Promise.all([
     db.select({ it: dispatchItems, name: products.name, variant: products.variant, sku: products.sku, stockQty: products.stockQty }).from(dispatchItems).innerJoin(products, eq(products.id, dispatchItems.productId)).where(eq(dispatchItems.dispatchId, id)),
     db.select({ id: uploads.id, fileName: uploads.fileName, size: uploads.size, createdAt: uploads.createdAt }).from(uploads).where(and(eq(uploads.kind, "dispatch_photo"), eq(uploads.refId, id))).orderBy(desc(uploads.createdAt)),
     getBrands(),
+    db
+      .select({ id: invoices.id, number: invoices.number })
+      .from(invoices)
+      .where(and(isNull(invoices.voidedAt), d.shopifyOrderId ? or(eq(invoices.dispatchId, id), eq(invoices.shopifyOrderId, d.shopifyOrderId)) : eq(invoices.dispatchId, id)))
+      .limit(1),
   ]);
   const editable = canEdit(user.role, "dispatch");
   const editing = editable && sp.edit === "1";
@@ -49,7 +54,7 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
     return (
       <>
         <PageHeader title={`Edit ${d.number}`} backHref={`/dispatch/${id}`} backLabel="Back to dispatch" />
-        <DispatchForm products={productOptions} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers.map((c) => ({ id: c.id, name: c.name }))} date={todayIST()} initial={{ ...d, items: items.map((r) => ({ productId: r.it.productId, qty: r.it.qty })) }} itemsLocked={d.stockDeducted} />
+        <DispatchForm products={productOptions} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers} date={todayIST()} initial={{ ...d, items: items.map((r) => ({ productId: r.it.productId, qty: r.it.qty, unitPriceP: r.it.unitPriceP })) }} itemsLocked={d.stockDeducted || !!invoice} />
       </>
     );
   }
@@ -69,7 +74,14 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
         <Link href={`/print/dispatch/${d.id}`} target="_blank" className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Printer /> Print challan
         </Link>
-        {editable && d.status !== "cancelled" ? (
+        {invoice ? (
+          <Link href={`/print/invoice/${invoice.id}`} target="_blank" className={buttonVariants({ size: "sm" })}>
+            <Printer /> Invoice {invoice.number}
+          </Link>
+        ) : editable && d.status !== "cancelled" ? (
+          <Link href={`/print/invoice/preview?source=dispatch&id=${d.id}`} className={buttonVariants({ variant: "outline", size: "sm" })}>Review invoice</Link>
+        ) : null}
+        {editable && !invoice && d.status !== "cancelled" ? (
           <Link href={`/dispatch/${d.id}?edit=1`} className={buttonVariants({ variant: "outline", size: "sm" })}>
             <Pencil /> Edit
           </Link>

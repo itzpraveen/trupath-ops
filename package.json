@@ -17,7 +17,8 @@
     "test:watch": "vitest",
     "test:e2e": "node scripts/e2e.mjs",
     "start:render": "npm run db:migrate && npm run db:seed && next start -p ${PORT:-3000}",
-    "stock:undo-import": "tsx scripts/undo-historical-stock.ts"
+    "stock:undo-import": "tsx scripts/undo-historical-stock.ts",
+    "test:integration": "vitest run --config vitest.integration.config.mts"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

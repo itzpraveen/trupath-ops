@@ -68,7 +68,7 @@ const CATEGORIES: Array<[schema.CategoryKind, string[]]> = [
   ],
   ["channel", ["Own website", "Offline / direct", "Wholesale / B2B", "Marketplace", "Instagram / WhatsApp"]],
   ["process", ["Stitching", "Cutting", "Embroidery", "Printing", "Quilting", "Packing"]],
-  ["designation", ["Manager", "Stitching", "Cutting", "Helper", "Packing", "Quality check"]],
+  ["designation", ["Factory Manager", "COO", "Designer", "Digital Marketer", "Accounts", "CRM", "Manager", "Stitching", "Cutting", "Helper", "Packing", "Quality check"]],
 ];
 
 async function main() {
@@ -80,7 +80,7 @@ async function main() {
   await db
     .insert(schema.entities)
     .values([
-      { id: "brand", name: "Trupaths Ventures", legalName: "Trupaths Ventures LLP", stateCode: "32", sortOrder: 0 },
+      { id: "brand", name: "Trupaths Ventures", legalName: "TRUPATHS VENTURES LLP", address: "3/312, Gold Tower Building Road,\nKottakkal PO, Kottakkal,\nMalappuram, Kerala – 676503", gstin: "32AAWFT1571F1Z0", stateCode: "32", sortOrder: 0 },
       { id: "factory", name: "Trupaths Factory", legalName: "Trupaths Ventures LLP (Factory)", stateCode: "32", sortOrder: 1 },
       { id: "firstbon", name: "Firstbon", legalName: "Firstbon", stateCode: "32", sortOrder: 2 },
     ])

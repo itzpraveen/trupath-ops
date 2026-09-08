@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import { createPayment, saveBankAccount } from "@/actions/payments";
 import type { BankAccount } from "@/db/schema";
 import { toRupees } from "@/lib/money";
@@ -12,10 +13,11 @@ import { Field, FormRow } from "@/components/app/field";
 import { FormDialog } from "@/components/app/form-dialog";
 
 export function PaymentDialog({ direction, contacts, accounts, entities, date, defaultEntity, defaultContactId, trigger, triggerLabel }: { direction: "in" | "out"; contacts: { id: string; name: string; type: string }[]; accounts: { id: string; name: string; entityId: string }[]; entities: { id: string; name: string }[]; date: string; defaultEntity: string; defaultContactId?: string; trigger?: React.ReactElement; triggerLabel?: React.ReactNode }) {
+  const [entityId, setEntityId] = useState(defaultEntity);
   const isIn = direction === "in";
-  const list = contacts.filter((c) => (isIn ? c.type === "customer" : c.type !== "customer"));
+  const list = contacts.filter((c) => !isIn || c.type === "customer");
   return (
-    <FormDialog trigger={trigger ?? <Button variant={isIn ? "default" : "outline"} size="sm" />} triggerLabel={triggerLabel ?? (isIn ? "Money received" : "Money paid")} title={isIn ? "Money received" : "Money paid out"} description={isIn ? "A customer paid against credit sales, or an advance." : "Paid a supplier or job worker against their bills."} action={createPayment} submitLabel={isIn ? "Record receipt" : "Record payment"}>
+    <FormDialog trigger={trigger ?? <Button variant={isIn ? "default" : "outline"} size="sm" />} triggerLabel={triggerLabel ?? (isIn ? "Money received" : "Money paid")} title={isIn ? "Money received" : "Money paid out"} description={isIn ? "A customer paid against credit sales, or an advance." : "Paid a supplier or job worker, or refunded a customer."} action={createPayment} submitLabel={isIn ? "Record receipt" : "Record payment"}>
       {(state) => {
         const fe = state?.fieldErrors ?? {};
         return (
@@ -23,7 +25,7 @@ export function PaymentDialog({ direction, contacts, accounts, entities, date, d
             <input type="hidden" name="direction" value={direction} />
             <FormRow>
               <Field label="Books" name="entityId" error={fe.entityId}>
-                <NativeSelect id="entityId" name="entityId" defaultValue={defaultEntity}>
+                <NativeSelect id="entityId" name="entityId" value={entityId} onChange={(e) => setEntityId(e.target.value)}>
                   {entities.map((e) => (
                     <option key={e.id} value={e.id}>
                       {e.name}
@@ -61,9 +63,9 @@ export function PaymentDialog({ direction, contacts, accounts, entities, date, d
                 </NativeSelect>
               </Field>
               <Field label="Into / from account" name="bankAccountId" error={fe.bankAccountId}>
-                <NativeSelect id="bankAccountId" name="bankAccountId" defaultValue="">
+                <NativeSelect key={entityId} id="bankAccountId" name="bankAccountId" defaultValue="">
                   <option value="">Not specified</option>
-                  {accounts.map((a) => (
+                  {accounts.filter((a) => a.entityId === entityId).map((a) => (
                     <option key={a.id} value={a.id}>
                       {a.name} ({ENTITY_LABEL[a.entityId] ?? a.entityId})
                     </option>

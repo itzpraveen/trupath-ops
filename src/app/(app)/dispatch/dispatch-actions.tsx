@@ -41,6 +41,13 @@ export function DispatchActions({ dispatch, canFulfil }: { dispatch: Dispatch; c
                     <Input id="trackingUrl" name="trackingUrl" inputMode="url" defaultValue={dispatch.trackingUrl ?? ""} />
                   </Field>
                 </FormRow>
+                <label className="flex items-start gap-2 text-sm">
+                  <input type="checkbox" name="createInvoice" defaultChecked className="mt-0.5 size-4 accent-primary" />
+                  <span>
+                    Create the tax invoice now
+                    <span className="block text-xs text-muted-foreground">Numbered from the books&apos; invoice series. Print it from this page for the parcel or the customer.</span>
+                  </span>
+                </label>
                 {dispatch.shopifyOrderId ? (
                   <div className="space-y-2 rounded-lg bg-muted/60 p-3">
                     <label className="flex items-start gap-2 text-sm">

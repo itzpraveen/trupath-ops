@@ -26,7 +26,7 @@ export function EmployeeDialog({ employee, designations, nextCode }: { employee?
               </Field>
             </FormRow>
             <FormRow>
-              <Field label="Role" name="designation" error={fe.designation}>
+              <Field label="Job role" name="designation" error={fe.designation}>
                 <NativeSelect id="designation" name="designation" defaultValue={employee?.designation ?? designations[0] ?? ""}>
                   {designations.map((d) => (
                     <option key={d} value={d}>

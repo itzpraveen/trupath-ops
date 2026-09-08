@@ -14,6 +14,7 @@ import { Field, FormRow } from "@/components/app/field";
 import { FormDialog } from "@/components/app/form-dialog";
 
 export type RecordOptions = {
+  brands?: { id: string; name: string }[];
   entities: { id: string; name: string }[];
   channels: string[];
   expenseCategories: string[];
@@ -28,7 +29,7 @@ const TITLES: Record<RecordKind, { title: string; description: string; submit: s
   purchase: { title: "Add purchase", description: "Raw material or stock bought for resale.", submit: "Add purchase" },
 };
 
-export function RecordFields({ kind, options, defaults, defaultEntity, defaultDate, state }: { kind: RecordKind; options: RecordOptions; defaults?: BusinessRecord; defaultEntity: string; defaultDate: string; state: ActionState }) {
+export function RecordFields({ kind, options, defaults, defaultEntity, defaultDate, defaultBrand = "all", state }: { kind: RecordKind; options: RecordOptions; defaults?: BusinessRecord; defaultEntity: string; defaultDate: string; defaultBrand?: string; state: ActionState }) {
   const fe = state?.fieldErrors ?? {};
   const isMoneyIn = kind === "sale";
   const contactList = options.contacts.filter((c) => (kind === "sale" || kind === "return" ? c.type === "customer" : c.type !== "customer"));
@@ -55,6 +56,7 @@ export function RecordFields({ kind, options, defaults, defaultEntity, defaultDa
           <Input id="amountP" name="amountP" inputMode="decimal" placeholder="0" defaultValue={defaults ? toRupees(defaults.amountP) : ""} required autoFocus={!defaults} />
         </Field>
       </FormRow>
+      <Field label="Brand" name="brandId" error={fe.brandId} hint="Choose the brand this entry belongs to. Leave shared costs unassigned until accounts allocates them."><NativeSelect id="brandId" name="brandId" defaultValue={defaults?.brandId ?? (defaultBrand === "all" || defaultBrand === "unassigned" ? "" : defaultBrand)}><option value="">Shared / unassigned</option>{options.brands?.map(b=><option key={b.id} value={b.id}>{b.name}</option>)}</NativeSelect></Field>
       <FormRow>
         {kind === "sale" || kind === "return" ? (
           <Field label="Channel" name="channel" error={fe.channel}>
@@ -125,7 +127,7 @@ export function RecordFields({ kind, options, defaults, defaultEntity, defaultDa
   );
 }
 
-export function AddRecordButtons({ options, defaultEntity, defaultDate, kinds }: { options: RecordOptions; defaultEntity: string; defaultDate: string; kinds?: RecordKind[] }) {
+export function AddRecordButtons({ options, defaultEntity, defaultDate, defaultBrand = "all", kinds }: { options: RecordOptions; defaultEntity: string; defaultDate: string; defaultBrand?: string; kinds?: RecordKind[] }) {
   const list = kinds ?? (["sale", "expense", "return", "purchase"] as RecordKind[]);
   return (
     <>
@@ -140,7 +142,7 @@ export function AddRecordButtons({ options, defaultEntity, defaultDate, kinds }:
           submitLabel={TITLES[kind].submit}
           wide
         >
-          {(state) => <RecordFields kind={kind} options={options} defaultEntity={defaultEntity} defaultDate={defaultDate} state={state} />}
+          {(state) => <RecordFields kind={kind} options={options} defaultEntity={defaultEntity} defaultDate={defaultDate} defaultBrand={defaultBrand} state={state} />}
         </FormDialog>
       ))}
     </>

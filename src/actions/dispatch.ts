@@ -4,19 +4,20 @@ import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
-import { db } from "@/db";
-import { businessRecords, dispatchItems, dispatches, products, shopifyOrders, type DispatchStatus, type ShopifyLine } from "@/db/schema";
+import { db, type Tx } from "@/db";
+import { businessRecords, dispatchItems, dispatches, invoices, payments, products, shopifyOrders, type DispatchStatus, type ShopifyLine } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { todayIST } from "@/lib/dates";
 import { errorMessage, parseForm, zBool, zDate, zEnum, zOptional, zOptionalMoney, zOptionalUuid, zRequired, zUuid, type ActionState } from "@/lib/forms";
-import { formatINR } from "@/lib/money";
+import { formatINR, toPaise } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
 import { lineForVariant, withDeducted } from "@/lib/order-stock";
 import { adjustStock } from "@/lib/stock";
 import { queueStockPush } from "@/lib/stock-push";
 import { entityExists } from "@/lib/queries/common";
 import { fulfillShopifyOrder } from "@/lib/shopify-writeback";
+import { issueInvoice } from "@/lib/invoice-issue";
 
 function revalidateDispatch(id?: string) {
   for (const p of ["/dispatch", "/stock", "/sales", "/orders", "/"]) revalidatePath(p);
@@ -45,13 +46,24 @@ const createSchema = headerSchema.extend({
   paymentMethod: zOptional(20),
   productId: z.array(z.string()).optional(),
   qty: z.array(z.string()).optional(),
+  unitPrice: z.array(z.string()).optional(),
 });
 
-function parseLines(productId?: string[], qty?: string[]) {
-  const lines = (productId ?? []).map((pid, i) => ({ productId: pid, qty: Math.floor(Number(qty?.[i] ?? 0)) })).filter((l) => /^[0-9a-f-]{36}$/i.test(l.productId) && l.qty > 0);
-  const merged = new Map<string, number>();
-  for (const l of lines) merged.set(l.productId, (merged.get(l.productId) ?? 0) + l.qty);
-  return [...merged.entries()].map(([productId, qty]) => ({ productId, qty }));
+function parseLines(productId?: string[], qty?: string[], unitPrice?: string[]) {
+  const lines = (productId ?? []).map((pid, i) => ({ productId: pid, qty: Number(qty?.[i] ?? 0), unitPriceP: unitPrice?.[i]?.trim() ? toPaise(unitPrice[i]) : null }));
+  if (lines.some((l) => !/^[0-9a-f-]{36}$/i.test(l.productId) || !Number.isSafeInteger(l.qty) || l.qty <= 0 || (l.unitPriceP !== null && l.unitPriceP < 0))) throw new Error("Check every product, quantity and selling price");
+  if (new Set(lines.map((l) => l.productId)).size !== lines.length) throw new Error("Use one row per product and increase its quantity");
+  return lines;
+}
+
+function checkPrices(lines: ReturnType<typeof parseLines>, amountP: number) {
+  if (amountP < 0) throw new Error("Order value cannot be negative");
+  if (lines.some((l) => l.unitPriceP !== null) && (lines.some((l) => l.unitPriceP === null) || lines.reduce((sum, l) => sum + l.unitPriceP! * l.qty, 0) !== amountP)) throw new Error("Enter a price for every item. The item totals must equal the order value.");
+}
+
+async function checkBrand(tx: Tx, lines: {productId:string}[], brandId:string) {
+  const rows=await tx.select({id:products.id,brandId:products.brandId}).from(products).where(inArray(products.id,lines.map(l=>l.productId)));
+  if (rows.length!==lines.length || rows.some(p=>p.brandId!==brandId)) throw new Error("Every item must belong to the selected brand");
 }
 
 export async function createDispatch(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -61,9 +73,12 @@ export async function createDispatch(_prev: ActionState, formData: FormData): Pr
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
-    const lines = parseLines(d.productId, d.qty);
+    const lines = parseLines(d.productId, d.qty, d.unitPrice);
+    checkPrices(lines, d.amountP);
     if (!lines.length) return { error: "Add at least one product with a quantity" };
     const id = await db.transaction(async (tx) => {
+      await checkBrand(tx,lines,d.brandId);
+      if (d.shopifyOrderId) throw new Error("Create website dispatches from the order page so they keep the correct books and items");
       const number = await nextNumber(tx, "dispatch", d.dispatchDate);
       const [row] = await tx
         .insert(dispatches)
@@ -93,6 +108,7 @@ export async function createDispatch(_prev: ActionState, formData: FormData): Pr
           number: saleNumber,
           entityId: d.entityId,
           kind: "sale",
+          brandId: d.brandId,
           workDate: d.dispatchDate,
           amountP: d.amountP,
           channel: d.channel ?? "Wholesale / B2B",
@@ -100,7 +116,7 @@ export async function createDispatch(_prev: ActionState, formData: FormData): Pr
           reference: d.orderRef || number,
           contactId: d.contactId ?? null,
           paymentMethod: (d.paymentMethod as "cash") || "credit",
-          paymentTerms: !d.paymentMethod || d.paymentMethod === "credit" ? "credit" : "paid",
+          paymentTerms: !d.paymentMethod || ["credit", "cod"].includes(d.paymentMethod) ? "credit" : "paid",
           source: "dispatch",
           sourceRef: `dispatch:${row.id}`,
           note: `${d.customerName} · ${number}`,
@@ -117,7 +133,7 @@ export async function createDispatch(_prev: ActionState, formData: FormData): Pr
   }
 }
 
-const updateSchema = headerSchema.extend({ id: zUuid("dispatch"), productId: z.array(z.string()).optional(), qty: z.array(z.string()).optional() });
+const updateSchema = headerSchema.extend({ id: zUuid("dispatch"), productId: z.array(z.string()).optional(), qty: z.array(z.string()).optional(), unitPrice: z.array(z.string()).optional() });
 
 export async function updateDispatch(_prev: ActionState, formData: FormData): Promise<ActionState> {
   try {
@@ -127,14 +143,32 @@ export async function updateDispatch(_prev: ActionState, formData: FormData): Pr
     const d = parsed.data;
     if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
     await db.transaction(async (tx) => {
+      const [ref] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id));
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${ref?.shopifyOrderId ? `order:${ref.shopifyOrderId}` : `dispatch:${d.id}`}, 0))`);
       const [existing] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id)).for("update");
       if (!existing) throw new Error("Dispatch not found");
+      const [issued] = await tx.select({ id: invoices.id }).from(invoices).where(and(isNull(invoices.voidedAt), existing.shopifyOrderId ? eq(invoices.shopifyOrderId, existing.shopifyOrderId) : eq(invoices.dispatchId, d.id)));
+      const changesSale = existing.entityId !== d.entityId || existing.amountP !== d.amountP || existing.contactId !== (d.contactId ?? null) || existing.customerName !== d.customerName || existing.address !== (d.address ?? null) || existing.dispatchDate !== d.dispatchDate || existing.brandId !== d.brandId || existing.orderRef !== (d.orderRef ?? "");
+      if (issued && (changesSale || d.productId)) throw new Error("This dispatch has an issued invoice. Its buyer, items and selling value are locked. Use the tracking controls to update courier details.");
+      if (existing.shopifyOrderId && changesSale) throw new Error("Change website order details in Shopify, then refresh the order here");
+      const [sale] = await tx.select().from(businessRecords).where(eq(businessRecords.sourceRef, `dispatch:${d.id}`)).for("update");
+      if (sale && changesSale) {
+        const [receipt] = await tx.select({ id: payments.id }).from(payments).where(and(eq(payments.recordId, sale.id), isNull(payments.voidedAt)));
+        if (receipt) throw new Error("This sale has an allocated payment. Accounts must review it before changing its value or books.");
+        await tx.update(businessRecords).set({ entityId: d.entityId, brandId: d.brandId, workDate: d.dispatchDate, amountP: d.amountP, contactId: d.contactId ?? null, reference: d.orderRef || existing.number, note: `${d.customerName} · ${existing.number}` }).where(eq(businessRecords.id, sale.id));
+      }
+
       await tx
         .update(dispatches)
         .set({ brandId: d.brandId, entityId: d.entityId, customerName: d.customerName, phone: d.phone ?? null, address: d.address ?? null, contactId: d.contactId ?? null, orderRef: d.orderRef ?? "", dispatchDate: d.dispatchDate, courier: d.courier ?? null, trackingNo: d.trackingNo ?? null, trackingUrl: d.trackingUrl ?? null, amountP: d.amountP, note: d.note ?? null })
         .where(eq(dispatches.id, d.id));
+      if (!existing.stockDeducted && (d.productId || existing.brandId!==d.brandId)) {
+        const checkLines=d.productId ? parseLines(d.productId,d.qty,d.unitPrice) : await tx.select({productId:dispatchItems.productId}).from(dispatchItems).where(eq(dispatchItems.dispatchId,d.id));
+        await checkBrand(tx,checkLines,d.brandId);
+      }
       if (!existing.stockDeducted && d.productId) {
-        const lines = parseLines(d.productId, d.qty);
+        const lines = parseLines(d.productId, d.qty, d.unitPrice);
+        checkPrices(lines, d.amountP);
         if (!lines.length) throw new Error("Add at least one product with a quantity");
         await tx.delete(dispatchItems).where(eq(dispatchItems.dispatchId, d.id));
         await tx.insert(dispatchItems).values(lines.map((l) => ({ dispatchId: d.id, ...l })));
@@ -158,6 +192,7 @@ const statusSchema = z.object({
   reason: zOptional(500),
   fulfilShopify: zBool,
   notifyCustomer: zBool,
+  createInvoice: zBool,
 });
 
 const ALLOWED: Record<DispatchStatus, DispatchStatus[]> = {
@@ -176,9 +211,16 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     const outcome = await db.transaction(async (tx) => {
+      const [ref] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id));
+      await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${ref?.shopifyOrderId ? `order:${ref.shopifyOrderId}` : `dispatch:${d.id}`}, 0))`);
       const [dsp] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id)).for("update");
       if (!dsp) throw new Error("Dispatch not found");
       if (!ALLOWED[dsp.status].includes(d.status)) throw new Error(`Cannot move from ${dsp.status} to ${d.status}`);
+      if (["cancelled", "returned"].includes(d.status)) {
+        const [issued] = await tx.select({ number: invoices.number }).from(invoices).where(and(isNull(invoices.voidedAt), dsp.shopifyOrderId ? eq(invoices.shopifyOrderId, dsp.shopifyOrderId) : eq(invoices.dispatchId, d.id)));
+        if (issued) throw new Error(`Invoice ${issued.number} is still issued. Accounts must cancel an unshipped invoice or process a credit note before returning this sale.`);
+      }
+
       const items = await tx.select().from(dispatchItems).where(eq(dispatchItems.dispatchId, d.id));
       const now = new Date();
       const set: Partial<typeof dispatches.$inferInsert> = { status: d.status };
@@ -268,6 +310,7 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
       return {
         number: dsp.number,
         shopifyOrderId: dsp.shopifyOrderId,
+        fulfillmentItems: (await tx.select({ variantId: products.shopifyVariantId, qty: dispatchItems.qty }).from(dispatchItems).innerJoin(products, eq(products.id, dispatchItems.productId)).where(eq(dispatchItems.dispatchId, d.id))),
         productIds: touched && !dsp.shopifyOrderId ? items.map((i) => i.productId) : [],
         courier: set.courier ?? dsp.courier,
         trackingNo: set.trackingNo ?? dsp.trackingNo,
@@ -280,11 +323,20 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
     let message = `${outcome.number} marked ${d.status}${outcome.notes.length ? ` (${outcome.notes.join("; ")})` : ""}`;
     if (d.status === "shipped" && d.fulfilShopify && outcome.shopifyOrderId) {
       try {
-        const r = await fulfillShopifyOrder(outcome.shopifyOrderId, { company: outcome.courier, number: outcome.trackingNo, url: outcome.trackingUrl }, d.notifyCustomer);
+        const r = await fulfillShopifyOrder(outcome.shopifyOrderId, { company: outcome.courier, number: outcome.trackingNo, url: outcome.trackingUrl }, d.notifyCustomer, outcome.fulfillmentItems);
         message += `. ${r.message}`;
         revalidatePath(`/orders/${outcome.shopifyOrderId}`);
       } catch (err) {
-        return { ok: true, message: `${message}. Shopify was not updated: ${errorMessage(err)}` };
+        message += `. Shopify was not updated: ${errorMessage(err)}`;
+      }
+    }
+    if (d.status === "shipped" && d.createInvoice) {
+      try {
+        const inv = await issueInvoice({ source: "dispatch", id: d.id, userId: user.id });
+        message += `. Invoice ${inv.number}${inv.created ? " created" : " already exists"}`;
+        revalidatePath("/sales");
+      } catch (err) {
+        message += `. Invoice not created: ${errorMessage(err)}`;
       }
     }
     return { ok: true, message };

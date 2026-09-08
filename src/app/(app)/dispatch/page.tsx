@@ -28,7 +28,10 @@ export default async function DispatchPage(props: PageProps<"/dispatch">) {
   const status = pick(sp.status, ["all", "open", "pending", "packed", "shipped", "delivered", "returned", "cancelled"], "open");
   const q = str(sp.q, 80);
   const page = int(sp.page);
+  const brandRows = await getBrands();
+  const brand = pick(sp.brand,["all",...brandRows.map(b=>b.id)],"all");
   const where = and(
+    brand === "all" ? undefined : eq(dispatches.brandId,brand),
     status === "all" ? undefined : status === "open" ? sql`${dispatches.status} in ('pending','packed','shipped')` : eq(dispatches.status, status),
     q ? or(ilike(dispatches.customerName, `%${q}%`), ilike(dispatches.number, `%${q}%`), ilike(dispatches.orderRef, `%${q}%`), ilike(dispatches.phone, `%${q}%`), ilike(dispatches.trackingNo, `%${q}%`)) : undefined,
   );
@@ -43,12 +46,12 @@ export default async function DispatchPage(props: PageProps<"/dispatch">) {
       .limit(PAGE)
       .offset((page - 1) * PAGE),
     db.select({ total: count() }).from(dispatches).where(where),
-    dispatchCounts(),
+    dispatchCounts("all",brand),
     getBrands(),
   ]);
   const brandName = Object.fromEntries(brands.map((b) => [b.id, b.name]));
   const editable = canEdit(user.role, "dispatch");
-  const params = { status, q: q || undefined };
+  const params = { status, brand, q: q || undefined };
   const pages = Math.max(1, Math.ceil(Number(total) / PAGE));
 
   return (
@@ -60,6 +63,7 @@ export default async function DispatchPage(props: PageProps<"/dispatch">) {
           </Link>
         ) : null}
       </PageHeader>
+      <div className="mb-4 flex flex-wrap items-center gap-2 text-sm"><span className="font-medium">Brand</span>{[["all","All brands"],...brands.map(b=>[b.id,b.name])].map(([id,name])=><Link key={id} href={`/dispatch${qs({...params,brand:id})}`} className={cn("rounded-full border px-3 py-1",brand===id ? "bg-foreground text-background":"bg-card")}>{name}</Link>)}</div>
       <StatGrid className="mb-5">
         <Stat label="To pack" value={counts.pending ?? 0} tone={(counts.pending ?? 0) > 0 ? "warning" : "default"} />
         <Stat label="Packed, waiting for courier" value={counts.packed ?? 0} />
@@ -83,7 +87,7 @@ export default async function DispatchPage(props: PageProps<"/dispatch">) {
           ))}
         </div>
         <form className="flex items-center gap-2" action="/dispatch">
-          <input type="hidden" name="status" value={status} />
+          <input type="hidden" name="brand" value={brand} /><input type="hidden" name="status" value={status} />
           <Input name="q" defaultValue={q} placeholder="Customer, number, tracking…" className="w-56" />
           <Button type="submit" variant="outline" size="sm">
             Search

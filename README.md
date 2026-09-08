@@ -42,9 +42,38 @@ First login: `owner@trupaths.in` / `change-me-now` (or whatever `SEED_OWNER_EMAI
 
 - `pnpm test` runs the unit tests (Vitest): money and date helpers, role permissions, form parsing, the website-order stock planner, Shopify signature checks and secret encryption.
 - `pnpm test:e2e` is the browser test. With a built server running (`PORT=3100 pnpm start`) and Google Chrome installed, it signs in, adds sales and expenses with GST, records production, marks attendance, creates a dispatch, bills a job work order in two batches, and checks role restrictions. It writes test data, so run it against a scratch database. It exits non-zero on any failure.
-- GitHub Actions (`.github/workflows/ci.yml`) runs build, typecheck, lint, unit tests and the browser test against a throwaway Postgres on every push and pull request.
+- `ALLOW_DB_TESTS=1 pnpm test:integration` verifies invoice issuance, counter concurrency, ledger updates, discounts, stock retries and cross-book payment guards. It requires a disposable localhost PostgreSQL database with migrations and seed applied. It also creates fixtures for `E2E_INVOICES=1 pnpm test:e2e`.
+- `E2E_INVOICE_ONLY=1 E2E_INVOICES=1 pnpm test:e2e` runs the focused invoice browser journey after those fixtures exist. `E2E_INVOICE_PDF=/absolute/path/preview.pdf` optionally saves its draft as an A4 PDF.
+- `E2E_DASHBOARD_ONLY=1 pnpm test:e2e` checks the brand filter, mobile layout and ledger entry defaults. `E2E_CREDIT_PDF=/absolute/path/credit-note.pdf` optionally exports the test credit note when invoice checks are enabled.
+- GitHub Actions (`.github/workflows/ci.yml`) runs build, typecheck, lint, unit tests, integration tests and the browser test against a throwaway Postgres on every push and pull request.
 
 Useful scripts: `pnpm db:generate` (new migration after editing `src/db/schema.ts`), `pnpm db:migrate`, `pnpm db:seed` (idempotent), `pnpm db:studio`, `pnpm typecheck`, `pnpm lint`.
+
+## Tax invoices
+
+For manual sales, use **Sales & expenses → New sale / tax invoice**. Select a saved customer, enter the agreed unit prices including GST (net of discounts), save the sale, review the draft, and issue it. For Shopify sales, refresh the order and select **Review invoice** on its order or dispatch page. **Tax invoices** lists both issued and cancelled documents.
+
+Before issuing real invoices:
+
+- Set each seller's legal name, registered address, GSTIN and state in Company details. Books sharing a GSTIN share invoice and credit-note counters for the same series and financial year.
+- Confirm the next unused number for each series and financial year against Tally and any other invoicing system. There is no assumed live starting number. Do not issue simultaneously from another system using the same series.
+- Confirm product HSN codes and GST rates. Delivery charged with goods defaults to the goods' HSN and GST rate, and its tax must reconcile with the source order. Mixed classifications require accounts review; a separate service classification must be explicitly configured after review. Buyer addresses and states are required; B2B buyers also need their GSTIN saved.
+- Record the accountant's e-invoice applicability review. B2B issuance is blocked while applicability is unconfirmed or required, because the IRP connection is not implemented. A documented exemption/non-applicability review applies to every set of books sharing the GSTIN.
+- Reconcile opening stock before dispatching. Saving or invoicing a manual sale does not deduct stock; shipping does.
+
+Issued invoices retain seller, buyer, item prices and tax snapshots. Ordinary edits cannot change them, and numbers cannot move backwards. Unshipped invoices may be cancelled with a reason by accounts; their number remains in the register. For an invoiced manual dispatch that has shipped, open the invoice and choose **Record return / credit note**. Accounts enters the quantities received and quantities fit for restocking, confirms GST adjustment eligibility, reviews and issues the credit note. Configure the next unused CN number first. Partial returns preserve the original invoice and reduce the customer's balance; only the selected saleable quantities return to stock. The credit-note register links to both documents, and customer refunds can be entered under Payments.
+
+Shopify refunds and credit notes still require reconciliation in the existing accounting system; the local credit-note action blocks website orders to avoid duplicate refund or stock postings. Shopify orders with refunds, unsupported currency or unreconciled source totals cannot receive a newly generated invoice. The invoice register flags orders later cancelled or refunded.
+
+GST filing, e-invoice IRNs / signed QR codes and e-way bills are not implemented. Opening stock and accounting balances must be reconciled before relying on this application as the accounting system. Migration 0007 backfills pre-existing invoices from the seller details available at migration time; it cannot reconstruct historical details that were never saved. See [invoicing readiness](docs/invoicing-readiness.md) for the current limits and setup still needed.
+
+## Dashboard brands and access
+
+The dashboard separates **Brand** (All brands, Baby Gambling, Firstbon) from **Accounting books** (the configured legal/accounting ledgers). A brand can have entries in more than one set of books. Website sales inherit the store's brand; manual dispatch sales and credit notes inherit the dispatch's brand. Manual ledger entries can select a brand or remain shared/unassigned. The migration backfills known source links, without guessing a brand from a book's name.
+
+Selecting a brand filters sales, expenses, returns, channels, website orders, dispatch, finished stock, production and recent entries. Ledger, order, dispatch and stock links retain the brand. Shared/unassigned costs remain in All brands, so a selected brand's net is not a fully allocated profit. Staff attendance and raw materials remain shared factory information.
+
+Owner and Accounts dashboards show financial summaries. Factory shows production, attendance and stock; Inventory & dispatch shows stock and dispatch without dashboard revenue totals. Brand selection is a reporting filter, not a per-user brand access restriction. Job roles on staff records are separate from login roles; login access is configured under Settings → Logins.
 
 ## Deploy on Render
 
@@ -93,7 +122,7 @@ The in-process scheduler (`SHOPIFY_SYNC_MINUTES`) is enough on Render. If you ho
 ## Data model notes
 
 - Money is stored as integer paise; quantities of raw material keep three decimals.
-- `entities` are the two sets of books (`brand`, `factory`). Ledger entries, payments, bank accounts, dispatches and job work carry an `entity_id`.
+- `entities` are accounting books; the configured list can include `brand`, `factory` and `firstbon`. Ledger entries, payments, bank accounts, dispatches and job work carry an `entity_id`. `brands` is a separate dimension. Ledger `brand_id` is nullable for shared/unassigned entries, and must not be inferred from `entity_id`.
 - Stock and material balances only change through `adjustStock` / `adjustMaterial`, which lock the row and write a movement, so history always explains the balance.
 - Website orders placed before the store was connected (the "stock baseline") never change finished stock; `npm run stock:undo-import` repairs stock if such orders were deducted before this rule existed.
 - Each website order line remembers how many units left stock (`deductedQty` in `shopify_orders.line_items`), so partial fulfilments, dispatches created from orders in this app, cancellations and dispatch returns never deduct or restore twice. The planner is pure (`src/lib/order-stock.ts`) and unit-tested.

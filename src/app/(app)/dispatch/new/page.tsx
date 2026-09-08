@@ -13,7 +13,7 @@ export default async function NewDispatchPage() {
   return (
     <>
       <PageHeader title="New dispatch" description="For website orders, open the order and use “Create dispatch” instead so the items are filled in for you." backHref="/dispatch" backLabel="Dispatch" />
-      <DispatchForm products={products} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers.map((c) => ({ id: c.id, name: c.name }))} date={todayIST()} />
+      <DispatchForm products={products} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers} date={todayIST()} />
     </>
   );
 }

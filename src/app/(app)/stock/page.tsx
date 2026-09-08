@@ -34,7 +34,7 @@ export default async function StockPage(props: PageProps<"/stock">) {
     eq(products.active, true),
     brand === "all" ? undefined : eq(products.brandId, brand),
     q ? or(ilike(products.name, `%${q}%`), ilike(products.variant, `%${q}%`), ilike(products.sku, `%${q}%`), ilike(products.category, `%${q}%`)) : undefined,
-    low ? sql`${products.minStock} > 0 and ${products.stockQty} <= ${products.minStock}` : undefined,
+    low ? sql`(${products.stockQty} < 0 or (${products.minStock} > 0 and ${products.stockQty} <= ${products.minStock}))` : undefined,
     inStock ? sql`${products.stockQty} > 0` : undefined,
   );
   const [rows, [{ total }], totals] = await Promise.all([
@@ -45,7 +45,7 @@ export default async function StockPage(props: PageProps<"/stock">) {
         brandId: products.brandId,
         units: sql<number>`coalesce(sum(${products.stockQty}),0)::int`,
         value: sql<number>`coalesce(sum(${products.stockQty} * ${products.costP}),0)::float8`,
-        low: sql<number>`count(*) filter (where ${products.minStock} > 0 and ${products.stockQty} <= ${products.minStock})::int`,
+        low: sql<number>`count(*) filter (where (${products.stockQty} < 0 or (${products.minStock} > 0 and ${products.stockQty} <= ${products.minStock})))::int`,
         skus: sql<number>`count(*) filter (where ${products.stockQty} > 0)::int`,
       })
       .from(products)
@@ -115,7 +115,7 @@ export default async function StockPage(props: PageProps<"/stock">) {
               <TableEmpty colSpan={8}>No products match this filter.</TableEmpty>
             ) : (
               rows.map((p) => {
-                const isLow = p.minStock > 0 && p.stockQty <= p.minStock;
+                const isLow = p.stockQty < 0 || (p.minStock > 0 && p.stockQty <= p.minStock);
                 return (
                   <TableRow key={p.id}>
                     <TableCell className="pr-0">

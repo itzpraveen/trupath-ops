@@ -6,11 +6,11 @@ import { addDays } from "@/lib/dates";
 
 const entityCond = (entity: string) => (entity === "all" ? undefined : eq(businessRecords.entityId, entity));
 
-export async function dailySeries(entity: string, from: string, to: string) {
+export async function dailySeries(entity: string, from: string, to: string, brand = "all") {
   const rows = await db
     .select({ date: businessRecords.workDate, kind: businessRecords.kind, total: sql<number>`coalesce(sum(${businessRecords.amountP}),0)::float8` })
     .from(businessRecords)
-    .where(and(isNull(businessRecords.voidedAt), gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entityCond(entity)))
+    .where(and(isNull(businessRecords.voidedAt), gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entityCond(entity), brand === "all" ? undefined : eq(businessRecords.brandId, brand)))
     .groupBy(businessRecords.workDate, businessRecords.kind);
   const map = new Map<string, { date: string; sales: number; expenses: number; returns: number }>();
   for (let d = from; d <= to; d = addDays(d, 1)) map.set(d, { date: d, sales: 0, expenses: 0, returns: 0 });
@@ -24,25 +24,25 @@ export async function dailySeries(entity: string, from: string, to: string) {
   return [...map.values()];
 }
 
-export async function channelSplit(entity: string, from: string, to: string) {
+export async function channelSplit(entity: string, from: string, to: string, brand = "all") {
   return db
     .select({ channel: businessRecords.channel, total: sql<number>`coalesce(sum(${businessRecords.amountP}),0)::float8`, n: sql<number>`count(*)::int` })
     .from(businessRecords)
-    .where(and(isNull(businessRecords.voidedAt), eq(businessRecords.kind, "sale"), gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entityCond(entity)))
+    .where(and(isNull(businessRecords.voidedAt), eq(businessRecords.kind, "sale"), gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entityCond(entity), brand === "all" ? undefined : eq(businessRecords.brandId, brand)))
     .groupBy(businessRecords.channel)
     .orderBy(desc(sql`sum(${businessRecords.amountP})`));
 }
 
-export async function expenseByCategory(entity: string, from: string, to: string) {
+export async function expenseByCategory(entity: string, from: string, to: string, brand = "all") {
   return db
     .select({ category: businessRecords.category, kind: businessRecords.kind, total: sql<number>`coalesce(sum(${businessRecords.amountP}),0)::float8`, n: sql<number>`count(*)::int` })
     .from(businessRecords)
-    .where(and(isNull(businessRecords.voidedAt), sql`${businessRecords.kind} in ('expense','purchase')`, gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entityCond(entity)))
+    .where(and(isNull(businessRecords.voidedAt), sql`${businessRecords.kind} in ('expense','purchase')`, gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entityCond(entity), brand === "all" ? undefined : eq(businessRecords.brandId, brand)))
     .groupBy(businessRecords.category, businessRecords.kind)
     .orderBy(desc(sql`sum(${businessRecords.amountP})`));
 }
 
-export async function factoryOnDate(date: string) {
+export async function factoryOnDate(date: string, brand = "all") {
   const rows = await db
     .select({
       productId: productionEntries.productId,
@@ -54,26 +54,26 @@ export async function factoryOnDate(date: string) {
     })
     .from(productionEntries)
     .innerJoin(products, eq(products.id, productionEntries.productId))
-    .where(and(eq(productionEntries.workDate, date), isNull(productionEntries.voidedAt)))
+    .where(and(eq(productionEntries.workDate, date), isNull(productionEntries.voidedAt), brand === "all" ? undefined : eq(productionEntries.brandId, brand)))
     .groupBy(productionEntries.productId, products.name, products.variant, productionEntries.brandId)
     .orderBy(desc(sql`sum(${productionEntries.qty})`));
   const units = rows.reduce((s, r) => s + Number(r.units), 0);
   return { units, entries: rows.reduce((s, r) => s + Number(r.entries), 0), byProduct: rows };
 }
 
-export async function productionInRange(from: string, to: string) {
+export async function productionInRange(from: string, to: string, brand = "all") {
   const [row] = await db
     .select({ units: sql<number>`coalesce(sum(${productionEntries.qty}),0)::int`, entries: sql<number>`count(*)::int` })
     .from(productionEntries)
-    .where(and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to), isNull(productionEntries.voidedAt)));
+    .where(and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to), isNull(productionEntries.voidedAt), brand === "all" ? undefined : eq(productionEntries.brandId, brand)));
   return { units: Number(row?.units ?? 0), entries: Number(row?.entries ?? 0) };
 }
 
-export async function lowStock(limit = 8) {
+export async function lowStock(limit = 8, brand = "all") {
   return db
     .select({ id: products.id, name: products.name, variant: products.variant, brandId: products.brandId, stockQty: products.stockQty, minStock: products.minStock, sku: products.sku })
     .from(products)
-    .where(and(eq(products.active, true), sql`${products.minStock} > 0`, sql`${products.stockQty} <= ${products.minStock}`))
+    .where(and(eq(products.active, true), brand === "all" ? undefined : eq(products.brandId, brand), sql`(${products.stockQty} < 0 or (${products.minStock} > 0 and ${products.stockQty} <= ${products.minStock}))`))
     .orderBy(asc(sql`${products.stockQty} - ${products.minStock}`))
     .limit(limit);
 }
@@ -82,7 +82,7 @@ export async function lowStockCount() {
   const [r] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(products)
-    .where(and(eq(products.active, true), sql`${products.minStock} > 0`, sql`${products.stockQty} <= ${products.minStock}`));
+    .where(and(eq(products.active, true), sql`(${products.stockQty} < 0 or (${products.minStock} > 0 and ${products.stockQty} <= ${products.minStock}))`));
   return Number(r?.n ?? 0);
 }
 
@@ -95,8 +95,8 @@ export async function lowMaterials(limit = 8) {
     .limit(limit);
 }
 
-export async function dispatchCounts() {
-  const rows = await db.select({ status: dispatches.status, n: sql<number>`count(*)::int` }).from(dispatches).groupBy(dispatches.status);
+export async function dispatchCounts(entity = "all", brand = "all") {
+  const rows = await db.select({ status: dispatches.status, n: sql<number>`count(*)::int` }).from(dispatches).where(and(entity === "all" ? undefined : eq(dispatches.entityId,entity), brand === "all" ? undefined : eq(dispatches.brandId,brand))).groupBy(dispatches.status);
   const out: Record<string, number> = {};
   for (const r of rows) out[r.status] = Number(r.n);
   return out;
@@ -116,27 +116,27 @@ export async function attendanceOnDate(date: string) {
   return { ...out, total: Number(total), unmarked: Number(total) - marked };
 }
 
-export async function recentRecords(limit = 8) {
+export async function recentRecords(limit = 8, entity = "all", brand = "all") {
   return db
     .select({ record: businessRecords, userName: users.name })
     .from(businessRecords)
     .leftJoin(users, eq(users.id, businessRecords.userId))
-    .where(isNull(businessRecords.voidedAt))
+    .where(and(isNull(businessRecords.voidedAt),entityCond(entity),brand === "all" ? undefined : eq(businessRecords.brandId,brand)))
     .orderBy(desc(businessRecords.createdAt))
     .limit(limit);
 }
 
-export async function ordersSummary(todayFrom: Date, monthFrom: string, monthTo: string, entity = "all") {
-  const ent = entity === "all" ? undefined : eq(shopifyOrders.entityId, entity);
+export async function ordersSummary(todayFrom: Date, monthFrom: string, monthTo: string, entity = "all", brand = "all", showMoney = true, shop = "all") {
+  const ent = and(entity === "all" ? undefined : eq(shopifyOrders.entityId, entity), brand === "all" ? undefined : eq(shopifyOrders.brandId, brand), shop === "all" ? undefined : eq(shopifyOrders.shop,shop));
   const [today] = await db.select({ n: sql<number>`count(*)::int` }).from(shopifyOrders).where(and(gte(shopifyOrders.createdAtShop, todayFrom), isNull(shopifyOrders.cancelledAt), ent));
   const [open] = await db
     .select({ n: sql<number>`count(*)::int` })
     .from(shopifyOrders)
     .where(and(isNull(shopifyOrders.cancelledAt), isNull(shopifyOrders.closedAt), sql`${shopifyOrders.fulfillmentStatus} not in ('FULFILLED','RESTOCKED')`, ent));
   const [month] = await db
-    .select({ n: sql<number>`count(*)::int`, total: sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` })
+    .select({ n: sql<number>`count(*)::int`, total: showMoney ? sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` : sql<number>`0` })
     .from(shopifyOrders)
     .where(and(isNull(shopifyOrders.cancelledAt), sql`(${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${monthFrom}::date and ${monthTo}::date`, ent));
-  const recent = await db.select().from(shopifyOrders).where(ent).orderBy(desc(shopifyOrders.createdAtShop)).limit(5);
+  const recent = await db.select({id:shopifyOrders.id,name:shopifyOrders.name,customerName:shopifyOrders.customerName,city:shopifyOrders.city,fulfillmentStatus:shopifyOrders.fulfillmentStatus,totalP:showMoney ? shopifyOrders.totalP : sql<number>`0`}).from(shopifyOrders).where(ent).orderBy(desc(shopifyOrders.createdAtShop)).limit(5);
   return { today: Number(today?.n ?? 0), open: Number(open?.n ?? 0), monthCount: Number(month?.n ?? 0), monthTotal: Number(month?.total ?? 0), recent };
 }

@@ -113,6 +113,14 @@ export function ProductDialog({ product, brands, categories, trigger }: { produc
                 <Input id="minStock" name="minStock" type="number" min={0} step={1} defaultValue={product?.minStock || ""} />
               </Field>
             </FormRow>
+            <FormRow>
+              <Field label="HSN code" name="hsnCode" error={fe.hsnCode} hint="For tax invoices, e.g. 5811 for quilted textile products.">
+                <Input id="hsnCode" name="hsnCode" defaultValue={product?.hsnCode ?? ""} placeholder="5811" />
+              </Field>
+              <Field label="GST rate (%)" name="gstRate" error={fe.gstRate} hint="Prices include this tax.">
+                <Input id="gstRate" name="gstRate" inputMode="decimal" defaultValue={product?.gstRate ?? ""} placeholder="5" />
+              </Field>
+            </FormRow>
             {!product ? (
               <Field label="Opening stock" name="openingQty" error={fe.openingQty}>
                 <Input id="openingQty" name="openingQty" type="number" min={0} step={1} />
