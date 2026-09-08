@@ -102,7 +102,7 @@ export default async function ShopifySettingsPage(props: PageProps<"/settings/sh
                       <InlineAction action={registerShopifyWebhooks} hidden={{ storeId: store.id }} variant="outline" size="sm">
                         Register webhooks
                       </InlineAction>
-                      <ConfirmAction trigger={<Button variant="outline" size="sm" />} title={`Push all stock to ${store.label}?`} description="Sets the website's available quantity for every product of this brand to the stock shown in this app. Products at 0 here will show as sold out on the website." action={pushAllStock} hidden={{ storeId: store.id }} confirmLabel="Push stock">
+                      <ConfirmAction trigger={<Button variant="outline" size="sm" />} title={`Push all stock to ${store.label}?`} description="Sets the website's on-hand quantity for every product of this brand to the stock shown in this app; Shopify subtracts units committed to open orders itself. Products at 0 here will show as sold out on the website." action={pushAllStock} hidden={{ storeId: store.id }} confirmLabel="Push stock">
                         Push all stock
                       </ConfirmAction>
                       <ConfirmAction trigger={<Button variant="ghost" size="sm" className="text-destructive" />} title={`Disconnect ${store.label}?`} description="Syncing stops until you connect again. Orders already synced stay in the books." action={disconnectShopify} hidden={{ storeId: store.id }} confirmLabel="Disconnect" destructive>

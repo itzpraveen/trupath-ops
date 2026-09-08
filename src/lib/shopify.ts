@@ -1,6 +1,7 @@
 import "server-only";
 import { createHmac, timingSafeEqual } from "node:crypto";
-import { listConnectedAuths, setStoreWebhooks, WEBHOOK_TOPICS, type StoreAuth } from "@/lib/shopify-oauth";
+import { ensureBaseline, listConnectedAuths, setStoreWebhooks, WEBHOOK_TOPICS, type StoreAuth } from "@/lib/shopify-oauth";
+import { planOrderStock } from "@/lib/order-stock";
 import { desc, eq, isNull, and, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { businessRecords, products, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
@@ -136,6 +137,7 @@ type OrderNode = {
       sku: string | null;
       quantity: number;
       currentQuantity: number;
+      unfulfilledQuantity: number;
       variant: { id: string } | null;
       product: { id: string } | null;
       originalUnitPriceSet: Money;
@@ -156,9 +158,9 @@ const ORDER_FIELDS = `
   totalShippingPriceSet { shopMoney { amount } }
   totalRefundedSet { shopMoney { amount } }
   refunds { id createdAt totalRefundedSet { shopMoney { amount } } }
-  lineItems(first: 60) {
+  lineItems(first: 250) {
     nodes {
-      id title variantTitle sku quantity currentQuantity
+      id title variantTitle sku quantity currentQuantity unfulfilledQuantity
       variant { id } product { id }
       originalUnitPriceSet { shopMoney { amount } }
       totalDiscountSet { shopMoney { amount } }
@@ -291,6 +293,7 @@ function mapLines(node: OrderNode): ShopifyLine[] {
     variantId: gidToId(li.variant?.id),
     productId: gidToId(li.product?.id),
     quantity: li.currentQuantity ?? li.quantity,
+    fulfilledQty: Math.max(0, (li.currentQuantity ?? li.quantity) - (li.unfulfilledQuantity ?? 0)),
     priceP: money(li.originalUnitPriceSet),
     discountP: money(li.totalDiscountSet),
   }));
@@ -339,25 +342,47 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
 
   await db.transaction(async (tx) => {
     const [existing] = await tx.select().from(shopifyOrders).where(eq(shopifyOrders.id, id)).for("update");
+    const cancelled = !!node.cancelledAt || node.displayFinancialStatus === "VOIDED";
+
+    // Finished stock: fulfilled units go out (per line, so split shipments deduct in parts) and a cancelled or
+    // restocked order puts back what went out. Orders placed before the stock baseline (when the store was
+    // connected) never touch stock, because the quantities on hand at that time were not in the system.
+    const baseline = auth.baselineAt;
+    const touchesStock = !baseline || new Date(node.createdAt) >= baseline;
+    const plan = planOrderStock({
+      lines,
+      previous: existing?.lineItems ?? null,
+      fulfillmentStatus: node.displayFulfillmentStatus,
+      cancelled,
+      touchesStock,
+      stockDeducted: existing?.stockDeducted ?? false,
+      stockRestored: existing?.stockRestored ?? false,
+    });
+    const stored = { ...row, lineItems: plan.lines, stockDeducted: plan.stockDeducted, stockRestored: plan.stockRestored };
     if (existing) {
-      const { id: _id, ...rest } = row;
+      const { id: _id, ...rest } = stored;
       void _id;
       await tx.update(shopifyOrders).set(rest).where(eq(shopifyOrders.id, id));
     } else {
-      await tx.insert(shopifyOrders).values(row);
+      await tx.insert(shopifyOrders).values(stored);
     }
 
     const workDate = toYmd(new Date(node.processedAt ?? node.createdAt));
     const isCod = (node.paymentGatewayNames ?? []).some((g) => /cash|cod|delivery/i.test(g));
-    const cancelled = !!node.cancelledAt || node.displayFinancialStatus === "VOIDED";
     const saleRef = `shopify:order:${id}:sale`;
+    const paid = node.displayFinancialStatus === "PAID" || node.displayFinancialStatus === "PARTIALLY_REFUNDED" || node.displayFinancialStatus === "REFUNDED";
 
-    // Sale record (one per order)
+    // Sale record (one per order). A cancelled order is a void sale; any refund Shopify issued for it is part of
+    // the cancellation, not a return, so those records are voided too rather than counted a second time.
     const [sale] = await tx.select().from(businessRecords).where(eq(businessRecords.sourceRef, saleRef)).limit(1);
     if (cancelled) {
       if (sale && !sale.voidedAt) {
         await tx.update(businessRecords).set({ voidedAt: new Date(), voidReason: "Cancelled on Shopify" }).where(eq(businessRecords.id, sale.id));
       }
+      await tx
+        .update(businessRecords)
+        .set({ voidedAt: new Date(), voidReason: "Cancelled on Shopify" })
+        .where(and(eq(businessRecords.shopifyOrderId, id), eq(businessRecords.kind, "return"), isNull(businessRecords.voidedAt)));
     } else if (!sale) {
       await tx.insert(businessRecords).values({
         entityId: auth.entityId,
@@ -368,7 +393,7 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
         category: "Website order",
         reference: node.name,
         paymentMethod: isCod ? "cod" : "gateway",
-        paymentTerms: node.displayFinancialStatus === "PAID" || node.displayFinancialStatus === "PARTIALLY_REFUNDED" || node.displayFinancialStatus === "REFUNDED" ? "paid" : "credit",
+        paymentTerms: paid ? "paid" : "credit",
         source: "shopify",
         sourceRef: saleRef,
         shopifyOrderId: id,
@@ -377,65 +402,40 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
     } else if (!sale.voidedAt) {
       await tx
         .update(businessRecords)
-        .set({
-          amountP: row.totalP,
-          workDate,
-          reference: node.name,
-          paymentMethod: isCod ? "cod" : "gateway",
-          paymentTerms: node.displayFinancialStatus === "PAID" || node.displayFinancialStatus === "PARTIALLY_REFUNDED" || node.displayFinancialStatus === "REFUNDED" ? "paid" : "credit",
-        })
+        .set({ amountP: row.totalP, workDate, reference: node.name, paymentMethod: isCod ? "cod" : "gateway", paymentTerms: paid ? "paid" : "credit" })
         .where(eq(businessRecords.id, sale.id));
     }
 
-    // Refunds -> return records (one per refund)
-    for (const refund of node.refunds ?? []) {
-      const amount = money(refund.totalRefundedSet);
-      if (amount <= 0) continue;
-      const ref = `shopify:refund:${gidToId(refund.id)}`;
-      await tx
-        .insert(businessRecords)
-        .values({
-          entityId: auth.entityId,
-          kind: "return",
-          workDate: toYmd(new Date(refund.createdAt)),
-          amountP: amount,
-          channel: auth.channel,
-          category: "Website refund",
-          reference: node.name,
-          paymentMethod: isCod ? "cod" : "gateway",
-          source: "shopify",
-          sourceRef: ref,
-          shopifyOrderId: id,
-          note: customerName,
-        })
-        .onConflictDoNothing({ target: businessRecords.sourceRef });
+    // Refunds -> return records (one per refund), for orders that are still live
+    if (!cancelled) {
+      for (const refund of node.refunds ?? []) {
+        const amount = money(refund.totalRefundedSet);
+        if (amount <= 0) continue;
+        await tx
+          .insert(businessRecords)
+          .values({
+            entityId: auth.entityId,
+            kind: "return",
+            workDate: toYmd(new Date(refund.createdAt)),
+            amountP: amount,
+            channel: auth.channel,
+            category: "Website refund",
+            reference: node.name,
+            paymentMethod: isCod ? "cod" : "gateway",
+            source: "shopify",
+            sourceRef: `shopify:refund:${gidToId(refund.id)}`,
+            shopifyOrderId: id,
+            note: customerName,
+          })
+          .onConflictDoNothing({ target: businessRecords.sourceRef });
+      }
     }
 
-    // Finished stock: deduct once when fulfilled, put back once when cancelled/restocked.
-    // Orders placed before the stock baseline (when the store was connected) never touch stock,
-    // because the quantities on hand at that time were not in the system.
-    const baseline = auth.baselineAt;
-    const touchesStock = !baseline || new Date(node.createdAt) >= baseline;
-    const fulfilled = touchesStock && node.displayFulfillmentStatus === "FULFILLED";
-    const restocked = touchesStock && (node.displayFulfillmentStatus === "RESTOCKED" || cancelled);
-    const stockDeducted = existing?.stockDeducted ?? false;
-    const stockRestored = existing?.stockRestored ?? false;
-    if (fulfilled && !stockDeducted) {
-      for (const line of lines) {
-        if (!line.variantId || line.quantity <= 0) continue;
-        const [p] = await tx.select({ id: products.id }).from(products).where(eq(products.shopifyVariantId, line.variantId)).limit(1);
-        if (!p) continue;
-        await adjustStock(tx, { productId: p.id, kind: "sale_out", qty: -line.quantity, refType: "shopify_order", refId: node.name, note: `Website order ${node.name}`, allowNegative: true });
-      }
-      await tx.update(shopifyOrders).set({ stockDeducted: true }).where(eq(shopifyOrders.id, id));
-    } else if (restocked && stockDeducted && !stockRestored) {
-      for (const line of lines) {
-        if (!line.variantId || line.quantity <= 0) continue;
-        const [p] = await tx.select({ id: products.id }).from(products).where(eq(products.shopifyVariantId, line.variantId)).limit(1);
-        if (!p) continue;
-        await adjustStock(tx, { productId: p.id, kind: "return_in", qty: line.quantity, refType: "shopify_order", refId: node.name, note: `Restocked from ${node.name}` });
-      }
-      await tx.update(shopifyOrders).set({ stockRestored: true }).where(eq(shopifyOrders.id, id));
+    for (const mv of plan.moves) {
+      const [p] = await tx.select({ id: products.id }).from(products).where(eq(products.shopifyVariantId, mv.variantId)).limit(1);
+      if (!p) continue;
+      if (mv.qty < 0) await adjustStock(tx, { productId: p.id, kind: "sale_out", qty: mv.qty, refType: "shopify_order", refId: node.name, note: `Website order ${node.name}`, allowNegative: true });
+      else await adjustStock(tx, { productId: p.id, kind: "return_in", qty: mv.qty, refType: "shopify_order", refId: node.name, note: `Restocked from ${node.name}` });
     }
   });
 }
@@ -459,6 +459,7 @@ export async function getLastSync(shop?: string) {
 }
 
 async function syncStore(auth: StoreAuth, opts: { trigger?: string; sinceDays?: number; full?: boolean }) {
+  auth = await ensureBaseline(auth);
   const [run] = await db.insert(syncRuns).values({ trigger: opts.trigger ?? "manual", shop: auth.shop }).returning();
   let ordersUpserted = 0;
   let productsUpserted = 0;
@@ -511,6 +512,7 @@ export async function syncShopify(opts: { trigger?: string; sinceDays?: number; 
 
 /** Fetch one order from Shopify and store it (used by webhooks). */
 export async function syncSingleOrder(numericId: string, auth: StoreAuth) {
+  auth = await ensureBaseline(auth);
   const node = await fetchOrderById(numericId, auth);
   if (node) await upsertOrderFromShopify(node, auth);
   return !!node;

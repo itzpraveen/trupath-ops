@@ -60,7 +60,11 @@ async function ensureLocation(auth: StoreAuth): Promise<string> {
 
 export type PushResult = { pushed: number; skipped: number; errors: string[] };
 
-/** Set the "available" quantity in Shopify to our stock for the given products (only stores with stock sync on). */
+/**
+ * Set Shopify's on-hand quantity to our stock for the given products (only stores with stock sync on). Stock here
+ * still includes units waiting to ship for open website orders, and so does Shopify's on-hand figure; Shopify works
+ * out the sellable ("available") quantity by subtracting those committed units itself.
+ */
 export async function pushStockForProducts(productIds: string[], opts: { force?: boolean } = {}): Promise<PushResult> {
   const result: PushResult = { pushed: 0, skipped: 0, errors: [] };
   if (!productIds.length) return result;
@@ -97,11 +101,21 @@ export async function pushStockForProducts(productIds: string[], opts: { force?:
       const locationId = await ensureLocation(auth);
       for (let i = 0; i < items.length; i += 100) {
         const chunk = items.slice(i, i + 100);
-        const r: { inventorySetQuantities: { userErrors: Array<{ field: string[] | null; message: string }> } } = await shopifyGraphQL(
-          `mutation SetStock($input: InventorySetQuantitiesInput!) { inventorySetQuantities(input: $input) { userErrors { field message } } }`,
+        const r: {
+          inventorySetQuantities: {
+            inventoryAdjustmentGroup: { changes: Array<{ name: string; quantityAfterChange: number | null; item: { id: string } }> } | null;
+            userErrors: Array<{ field: string[] | null; message: string }>;
+          };
+        } = await shopifyGraphQL(
+          `mutation SetStock($input: InventorySetQuantitiesInput!) {
+            inventorySetQuantities(input: $input) {
+              inventoryAdjustmentGroup { changes { name quantityAfterChange item { id } } }
+              userErrors { field message }
+            }
+          }`,
           {
             input: {
-              name: "available",
+              name: "on_hand",
               reason: "correction",
               ignoreCompareQuantity: true,
               quantities: chunk.map((p) => ({ inventoryItemId: `gid://shopify/InventoryItem/${p.inventoryItemId}`, locationId, quantity: Math.max(0, p.stockQty) })),
@@ -110,9 +124,17 @@ export async function pushStockForProducts(productIds: string[], opts: { force?:
           auth,
         );
         if (r.inventorySetQuantities.userErrors.length) throw new Error(r.inventorySetQuantities.userErrors.map((e) => e.message).join(", "));
+        // Shopify reports the sellable quantity that resulted; keep our copy of it current.
+        const available = new Map<string, number>();
+        for (const c of r.inventorySetQuantities.inventoryAdjustmentGroup?.changes ?? []) {
+          if (c.name === "available" && c.quantityAfterChange !== null) available.set(c.item.id.split("/").pop() ?? "", c.quantityAfterChange);
+        }
+        for (const p of chunk) {
+          const q = available.get(p.inventoryItemId ?? "");
+          if (q !== undefined) await db.update(products).set({ shopifyQty: q }).where(eq(products.id, p.id));
+        }
         result.pushed += chunk.length;
       }
-      for (const p of items) await db.update(products).set({ shopifyQty: Math.max(0, p.stockQty) }).where(eq(products.id, p.id));
     } catch (err) {
       result.errors.push(err instanceof Error ? err.message : String(err));
     }

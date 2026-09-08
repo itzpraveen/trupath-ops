@@ -1,17 +1,18 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
 import { z } from "zod";
 import { db } from "@/db";
-import { businessRecords, dispatchItems, dispatches, products, shopifyOrders, type DispatchStatus } from "@/db/schema";
+import { businessRecords, dispatchItems, dispatches, products, shopifyOrders, type DispatchStatus, type ShopifyLine } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { todayIST } from "@/lib/dates";
 import { errorMessage, parseForm, zBool, zDate, zEnum, zOptional, zOptionalMoney, zOptionalUuid, zRequired, zUuid, type ActionState } from "@/lib/forms";
 import { formatINR } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
+import { lineForVariant, withDeducted } from "@/lib/order-stock";
 import { adjustStock } from "@/lib/stock";
 import { queueStockPush } from "@/lib/stock-push";
 import { entityExists } from "@/lib/queries/common";
@@ -184,43 +185,99 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
       if (d.courier !== undefined) set.courier = d.courier;
       if (d.trackingNo !== undefined) set.trackingNo = d.trackingNo;
       if (d.trackingUrl !== undefined) set.trackingUrl = d.trackingUrl;
-      // A dispatch created from a website order shares its stock movement with the order sync: whichever happens first deducts.
+
+      // A dispatch for a website order shares its stock effect with the order sync. Each order line remembers how
+      // many units already left stock, so whichever side acts first deducts and the other only tops up the difference.
       const [order] = dsp.shopifyOrderId ? await tx.select().from(shopifyOrders).where(eq(shopifyOrders.id, dsp.shopifyOrderId)).for("update") : [];
+      const orderLines: ShopifyLine[] = order ? withDeducted(order.lineItems, order.stockDeducted, order.stockRestored) : [];
+      const variantOf = new Map<string, string | null>();
+      if (order && items.length) {
+        const rows = await tx.select({ id: products.id, variantId: products.shopifyVariantId }).from(products).where(inArray(products.id, items.map((i) => i.productId)));
+        for (const r of rows) variantOf.set(r.id, r.variantId);
+      }
+      const notes: string[] = [];
       let touched = false;
+
       if (d.status === "shipped") {
         set.shippedAt = now;
         if (!dsp.stockDeducted) {
-          if (order?.stockDeducted && !order.stockRestored) {
-            // the order sync already took the stock out
-          } else {
-            for (const it of items) await adjustStock(tx, { productId: it.productId, kind: "dispatch_out", qty: -it.qty, refType: "dispatch", refId: dsp.number, note: `Dispatched ${dsp.number} to ${dsp.customerName}`, userId: user.id });
-            touched = true;
-            if (order) await tx.update(shopifyOrders).set({ stockDeducted: true, stockRestored: false }).where(eq(shopifyOrders.id, order.id));
+          let any = false;
+          for (const it of items) {
+            const line = order ? lineForVariant(orderLines, variantOf.get(it.productId)) : undefined;
+            const already = line && !order?.stockRestored ? (line.deductedQty ?? 0) : 0;
+            const qty = Math.max(0, it.qty - already);
+            if (line) line.deductedQty = already + qty;
+            if (qty > 0) {
+              await adjustStock(tx, { productId: it.productId, kind: "dispatch_out", qty: -qty, refType: "dispatch", refId: dsp.number, note: `Dispatched ${dsp.number} to ${dsp.customerName}`, userId: user.id });
+              any = true;
+            }
+          }
+          if (order) {
+            await tx.update(shopifyOrders).set({ lineItems: orderLines, stockDeducted: order.stockDeducted || any, stockRestored: false }).where(eq(shopifyOrders.id, order.id));
+            if (!any) notes.push("stock had already been deducted by the website order");
           }
           set.stockDeducted = true;
+          touched = any;
         }
       }
       if (d.status === "delivered") set.deliveredAt = now;
+
       if ((d.status === "returned" || d.status === "cancelled") && dsp.stockDeducted) {
-        for (const it of items) await adjustStock(tx, { productId: it.productId, kind: "return_in", qty: it.qty, refType: "dispatch", refId: dsp.number, note: `${d.status === "returned" ? "Returned" : "Cancelled"} ${dsp.number}${d.reason ? `: ${d.reason}` : ""}`, userId: user.id });
-        touched = true;
+        const note = `${d.status === "returned" ? "Returned" : "Cancelled"} ${dsp.number}${d.reason ? `: ${d.reason}` : ""}`;
+        const putBack = async (productId: string, qty: number) => {
+          await adjustStock(tx, { productId, kind: "return_in", qty, refType: "dispatch", refId: dsp.number, note, userId: user.id });
+          touched = true;
+        };
+        if (order) {
+          if (order.stockRestored) {
+            notes.push("the website order had already put its stock back");
+          } else {
+            // everything the website order took out, whether this dispatch or the order sync deducted it
+            for (const l of orderLines) {
+              const q = l.deductedQty ?? 0;
+              if (!l.variantId || q <= 0) continue;
+              const [p] = await tx.select({ id: products.id }).from(products).where(eq(products.shopifyVariantId, l.variantId)).limit(1);
+              if (p) await putBack(p.id, q);
+              l.deductedQty = 0;
+            }
+          }
+          // anything on the dispatch that is not part of the website order
+          for (const it of items) if (!lineForVariant(orderLines, variantOf.get(it.productId))) await putBack(it.productId, it.qty);
+          await tx.update(shopifyOrders).set({ lineItems: orderLines, stockRestored: true }).where(eq(shopifyOrders.id, order.id));
+        } else {
+          for (const it of items) await putBack(it.productId, it.qty);
+        }
         set.stockDeducted = false;
-        if (order) await tx.update(shopifyOrders).set({ stockRestored: true }).where(eq(shopifyOrders.id, order.id));
       }
+
       if (d.reason) set.note = dsp.note ? `${dsp.note}\n${d.status}: ${d.reason}` : `${d.status}: ${d.reason}`;
       await tx.update(dispatches).set(set).where(eq(dispatches.id, d.id));
       if (d.status === "cancelled" || d.status === "returned") {
         await tx
           .update(businessRecords)
           .set({ voidedAt: now, voidedBy: user.id, voidReason: `Dispatch ${d.status}${d.reason ? `: ${d.reason}` : ""}` })
-          .where(and(eq(businessRecords.sourceRef, `dispatch:${d.id}`)));
+          .where(and(eq(businessRecords.sourceRef, `dispatch:${d.id}`), isNull(businessRecords.voidedAt)));
+      } else if (dsp.status === "cancelled" && d.status === "pending") {
+        // reopening a cancelled dispatch brings back the sale it had recorded
+        await tx
+          .update(businessRecords)
+          .set({ voidedAt: null, voidedBy: null, voidReason: null })
+          .where(and(eq(businessRecords.sourceRef, `dispatch:${d.id}`), sql`${businessRecords.voidReason} like 'Dispatch cancelled%'`));
       }
       await audit(tx, { userId: user.id, action: d.status, entityType: "dispatch", entityId: d.id, summary: `${dsp.number} marked ${d.status}${d.trackingNo ? ` (${d.courier ?? ""} ${d.trackingNo})` : ""}` });
-      return { number: dsp.number, shopifyOrderId: dsp.shopifyOrderId, productIds: touched && !dsp.shopifyOrderId ? items.map((i) => i.productId) : [], courier: set.courier ?? dsp.courier, trackingNo: set.trackingNo ?? dsp.trackingNo, trackingUrl: set.trackingUrl ?? dsp.trackingUrl };
+      return {
+        number: dsp.number,
+        shopifyOrderId: dsp.shopifyOrderId,
+        productIds: touched && !dsp.shopifyOrderId ? items.map((i) => i.productId) : [],
+        courier: set.courier ?? dsp.courier,
+        trackingNo: set.trackingNo ?? dsp.trackingNo,
+        trackingUrl: set.trackingUrl ?? dsp.trackingUrl,
+        notes,
+      };
     });
     queueStockPush(outcome.productIds);
     revalidateDispatch(d.id);
-    let message = `${outcome.number} marked ${d.status}`;
+    let message = `${outcome.number} marked ${d.status}${outcome.notes.length ? ` (${outcome.notes.join("; ")})` : ""}`;
     if (d.status === "shipped" && d.fulfilShopify && outcome.shopifyOrderId) {
       try {
         const r = await fulfillShopifyOrder(outcome.shopifyOrderId, { company: outcome.courier, number: outcome.trackingNo, url: outcome.trackingUrl }, d.notifyCustomer);
@@ -252,6 +309,7 @@ export async function createDispatchFromOrder(orderId: string) {
       .insert(dispatches)
       .values({
         number,
+        // orders synced before stores existed carry no brand/books; they were all Baby Gambling website orders
         brandId: order.brandId ?? "babygambling",
         entityId: order.entityId ?? "brand",
         orderRef: order.name,

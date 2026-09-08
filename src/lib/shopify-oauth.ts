@@ -1,6 +1,6 @@
 import "server-only";
 import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, isNull } from "drizzle-orm";
 import { db } from "@/db";
 import { shopifyStores, type ShopifyStore } from "@/db/schema";
 
@@ -52,22 +52,35 @@ export type StoreAuth = {
 
 /* ---------------- encryption ---------------- */
 
-function encKey() {
-  const secret = process.env.APP_ENCRYPTION_KEY?.trim() || process.env.SHOPIFY_CLIENT_SECRET?.trim();
-  if (!secret) throw new Error("Set APP_ENCRYPTION_KEY (or SHOPIFY_CLIENT_SECRET) on the server so store secrets can be stored safely.");
-  return createHash("sha256").update(secret).digest();
+/**
+ * Keys that may have encrypted a stored secret, newest first: the dedicated app key, then the Shopify client
+ * secret that older deployments fell back to. New secrets always use the first key; decryption tries each, so
+ * adding APP_ENCRYPTION_KEY to an existing deployment keeps every stored token readable.
+ */
+function encKeys(): Buffer[] {
+  const secrets = [process.env.APP_ENCRYPTION_KEY?.trim(), process.env.SHOPIFY_CLIENT_SECRET?.trim()].filter((v): v is string => !!v);
+  if (!secrets.length) throw new Error("Set APP_ENCRYPTION_KEY on the server so store secrets can be stored safely (see .env.example).");
+  return secrets.map((secret) => createHash("sha256").update(secret).digest());
 }
 export function encryptSecret(text: string) {
   const iv = randomBytes(12);
-  const cipher = createCipheriv("aes-256-gcm", encKey(), iv);
+  const cipher = createCipheriv("aes-256-gcm", encKeys()[0], iv);
   const enc = Buffer.concat([cipher.update(text, "utf8"), cipher.final()]);
   return Buffer.concat([iv, cipher.getAuthTag(), enc]).toString("base64");
 }
 export function decryptSecret(b64: string) {
   const buf = Buffer.from(b64, "base64");
-  const decipher = createDecipheriv("aes-256-gcm", encKey(), buf.subarray(0, 12));
-  decipher.setAuthTag(buf.subarray(12, 28));
-  return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString("utf8");
+  let lastError: unknown = new Error("Could not decrypt the stored secret");
+  for (const key of encKeys()) {
+    try {
+      const decipher = createDecipheriv("aes-256-gcm", key, buf.subarray(0, 12));
+      decipher.setAuthTag(buf.subarray(12, 28));
+      return Buffer.concat([decipher.update(buf.subarray(28)), decipher.final()]).toString("utf8");
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
 }
 function tryDecrypt(b64: string | null | undefined): string | null {
   if (!b64) return null;
@@ -128,8 +141,25 @@ export function storeAuth(store: ShopifyStore): StoreAuth | null {
   return { storeId: store.id, shop: store.shop, label: store.label, token, version: shopifyApiVersion(), brandId: store.brandId, entityId: store.entityId, channel: store.channel, baselineAt: store.baselineAt, scope: store.scope ?? "", pushInventory: store.pushInventory, locationId: store.locationId };
 }
 
+/**
+ * A store connected with a token from the environment never went through the install callback, so it has no
+ * stock baseline. Set it the first time the store is used: orders placed before that moment never change stock.
+ */
+export async function ensureBaseline(auth: StoreAuth): Promise<StoreAuth> {
+  if (auth.baselineAt) return auth;
+  const now = new Date();
+  await db.update(shopifyStores).set({ baselineAt: now }).where(and(eq(shopifyStores.id, auth.storeId), isNull(shopifyStores.baselineAt)));
+  const [row] = await db.select({ baselineAt: shopifyStores.baselineAt }).from(shopifyStores).where(eq(shopifyStores.id, auth.storeId)).limit(1);
+  return { ...auth, baselineAt: row?.baselineAt ?? now };
+}
+
 export async function listConnectedAuths(): Promise<StoreAuth[]> {
-  return (await listStores()).map(storeAuth).filter((a): a is StoreAuth => !!a);
+  const auths: StoreAuth[] = [];
+  for (const store of await listStores()) {
+    const auth = storeAuth(store);
+    if (auth) auths.push(await ensureBaseline(auth));
+  }
+  return auths;
 }
 
 export async function upsertStore(input: { id?: string; shop: string; label: string; brandId: string; entityId: string; channel: string; clientId?: string | null; clientSecret?: string | null; active?: boolean; pushInventory?: boolean }) {

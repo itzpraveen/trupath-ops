@@ -17,6 +17,7 @@ import { DISPATCH_TONE, StatusBadge } from "@/components/app/status-badge";
 import { Table, TableBody, TableCard, TableCell, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
 import { SyncButton } from "../sync-button";
 import { FulfilDialog } from "../fulfil-dialog";
+import { withDeducted } from "@/lib/order-stock";
 import { FULFIL_SCOPE, getStoreByShop, hasScope } from "@/lib/shopify-oauth";
 
 export const metadata: Metadata = { title: "Order" };
@@ -35,6 +36,8 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
     db.select().from(businessRecords).where(eq(businessRecords.shopifyOrderId, id)),
   ]);
   const byVariant = new Map(matched.map((m) => [m.shopifyVariantId!, m]));
+  const orderedUnits = o.lineItems.reduce((s, l) => s + l.quantity, 0);
+  const deductedUnits = withDeducted(o.lineItems, o.stockDeducted, o.stockRestored).reduce((s, l) => s + (l.deductedQty ?? 0), 0);
   const editable = canEdit(user.role, "orders") && canEdit(user.role, "dispatch");
   const addr = o.shippingAddress ?? {};
   const handle = o.shop?.replace(".myshopify.com", "");
@@ -155,7 +158,7 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
                 <li className="px-4 py-2 text-muted-foreground">No ledger entries yet.</li>
               )}
               <li className="px-4 py-2 text-xs text-muted-foreground">
-                Stock {o.stockDeducted ? "deducted when fulfilled" : "not deducted yet (happens when Shopify marks it fulfilled)"}. Synced {formatDateTime(o.syncedAt)}.
+                Stock: {o.stockRestored ? "put back" : deductedUnits ? `${deductedUnits} of ${orderedUnits} units deducted` : "not deducted yet (happens as Shopify marks items fulfilled, or when the dispatch ships)"}. Synced {formatDateTime(o.syncedAt)}.
               </li>
             </ul>
           </Section>
