@@ -135,10 +135,15 @@ export async function setAttendance(input: { employeeId: string; workDate: strin
     const parsed = z.object({ employeeId: zUuid("employee"), workDate: zDate, status: zEnum(STATUSES, "status") }).safeParse(input);
     if (!parsed.success) return { error: "Invalid attendance entry" };
     const d = parsed.data;
-    await db
-      .insert(attendance)
-      .values({ employeeId: d.employeeId, workDate: d.workDate, status: d.status, userId: user.id })
-      .onConflictDoUpdate({ target: [attendance.employeeId, attendance.workDate], set: { status: d.status, userId: user.id, updatedAt: new Date() } });
+    await db.transaction(async (tx) => {
+      const [emp] = await tx.select({ name: employees.name }).from(employees).where(eq(employees.id, d.employeeId)).limit(1);
+      if (!emp) throw new Error("Staff member not found");
+      await tx
+        .insert(attendance)
+        .values({ employeeId: d.employeeId, workDate: d.workDate, status: d.status, userId: user.id })
+        .onConflictDoUpdate({ target: [attendance.employeeId, attendance.workDate], set: { status: d.status, userId: user.id, updatedAt: new Date() } });
+      await audit(tx, { userId: user.id, action: "attendance", entityType: "attendance", entityId: d.employeeId, summary: `${emp.name} ${d.workDate}: ${d.status.replace("_", " ")}` });
+    });
     revalidatePath("/factory");
     revalidatePath("/factory/attendance");
     revalidatePath("/");
@@ -165,10 +170,16 @@ export async function saveAttendanceDetails(_prev: ActionState, formData: FormDa
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     const set = { status: d.status, checkIn: d.checkIn ?? null, checkOut: d.checkOut ?? null, overtimeMin: d.overtimeMin ?? 0, note: d.note ?? null, userId: user.id, updatedAt: new Date() };
-    await db
-      .insert(attendance)
-      .values({ employeeId: d.employeeId, workDate: d.workDate, ...set })
-      .onConflictDoUpdate({ target: [attendance.employeeId, attendance.workDate], set });
+    await db.transaction(async (tx) => {
+      const [emp] = await tx.select({ name: employees.name }).from(employees).where(eq(employees.id, d.employeeId)).limit(1);
+      if (!emp) throw new Error("Staff member not found");
+      await tx
+        .insert(attendance)
+        .values({ employeeId: d.employeeId, workDate: d.workDate, ...set })
+        .onConflictDoUpdate({ target: [attendance.employeeId, attendance.workDate], set });
+      const details = [d.checkIn && `in ${d.checkIn}`, d.checkOut && `out ${d.checkOut}`, d.overtimeMin && `${d.overtimeMin} min overtime`].filter(Boolean).join(", ");
+      await audit(tx, { userId: user.id, action: "attendance", entityType: "attendance", entityId: d.employeeId, summary: `${emp.name} ${d.workDate}: ${d.status.replace("_", " ")}${details ? ` (${details})` : ""}` });
+    });
     revalidatePath("/factory");
     revalidatePath("/factory/attendance");
     return { ok: true, message: "Attendance saved" };

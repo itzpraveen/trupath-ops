@@ -15,7 +15,8 @@ import { FormDialog } from "@/components/app/form-dialog";
 export function JobWorkActions({ order, sentMaterials, date }: { order: JobWorkOrder; sentMaterials: { materialId: string; name: string; unit: string; qtySent: number; qtyReturned: number }[]; date: string }) {
   const open = order.status !== "closed" && order.status !== "cancelled";
   const pending = Math.max(0, order.orderedQty - order.receivedQty - order.rejectedQty);
-  const computedBill = Math.round(order.receivedQty * order.ratePerUnitP * (1 + order.taxBps / 10000));
+  const unbilled = Math.max(0, order.receivedQty - order.billedQty);
+  const computedBill = Math.round(unbilled * order.ratePerUnitP * (1 + order.taxBps / 10000));
   return (
     <div className="flex flex-wrap gap-2">
       {order.status === "draft" ? (
@@ -76,8 +77,8 @@ export function JobWorkActions({ order, sentMaterials, date }: { order: JobWorkO
           }}
         </FormDialog>
       ) : null}
-      {order.status !== "draft" && !order.billedAt && order.receivedQty > 0 ? (
-        <FormDialog trigger={<Button variant="outline" size="sm" />} triggerLabel="Record bill" title="Job worker's bill" description={computedBill ? `${order.receivedQty} pcs × ${formatINR(order.ratePerUnitP)}${order.taxBps ? ` + ${order.taxBps / 100}% GST` : ""} = ${formatINR(computedBill)}. Recorded as a Job work expense in the factory books.` : "No rate on the order, so enter the bill amount."} action={billJobWork} submitLabel="Record bill">
+      {order.status !== "draft" && order.status !== "cancelled" && unbilled > 0 ? (
+        <FormDialog trigger={<Button variant="outline" size="sm" />} triggerLabel={order.billedQty ? "Record next bill" : "Record bill"} title="Job worker's bill" description={`${computedBill ? `${unbilled} pcs × ${formatINR(order.ratePerUnitP)}${order.taxBps ? ` + ${order.taxBps / 100}% GST` : ""} = ${formatINR(computedBill)}. ` : "No rate on the order, so enter the bill amount. "}${order.billedQty ? `${order.billedQty} pieces were billed earlier. ` : ""}Recorded as a Job work expense in the factory books.`} action={billJobWork} submitLabel="Record bill">
           {(state) => {
             const fe = state?.fieldErrors ?? {};
             return (

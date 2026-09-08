@@ -46,6 +46,7 @@ export async function createRecord(_prev: ActionState, formData: FormData): Prom
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     if (!(await entityExists(d.entityId))) return { error: "Choose which books this belongs to", fieldErrors: { entityId: ["Unknown books"] } };
+    if (d.gstP >= d.amountP) return { error: "GST must be less than the amount", fieldErrors: { gstP: ["Must be less than the amount"] } };
     const id = await db.transaction(async (tx) => {
       const number = await nextNumber(tx, d.kind, d.workDate);
       const [row] = await tx
@@ -63,7 +64,7 @@ export async function createRecord(_prev: ActionState, formData: FormData): Prom
           paymentMethod: d.paymentMethod,
           bankAccountId: d.bankAccountId ?? null,
           paymentTerms: d.paymentMethod === "credit" ? "credit" : "paid",
-          taxableP: d.taxableP || null,
+          taxableP: d.gstP ? d.taxableP || d.amountP - d.gstP : null,
           gstP: d.gstP || null,
           note: d.note ?? null,
           userId: user.id,
@@ -91,6 +92,7 @@ export async function updateRecord(_prev: ActionState, formData: FormData): Prom
     if (!existing) return { error: "Record not found" };
     if (existing.voidedAt) return { error: "This record was voided and cannot be edited" };
     if (existing.source !== "manual") return { error: "Synced records are managed by the source system. Void it instead." };
+    if (d.gstP >= d.amountP) return { error: "GST must be less than the amount", fieldErrors: { gstP: ["Must be less than the amount"] } };
     await db.transaction(async (tx) => {
       await tx
         .update(businessRecords)
@@ -104,7 +106,7 @@ export async function updateRecord(_prev: ActionState, formData: FormData): Prom
           paymentMethod: d.paymentMethod,
           bankAccountId: d.bankAccountId ?? null,
           paymentTerms: d.paymentMethod === "credit" ? "credit" : "paid",
-          taxableP: d.taxableP || null,
+          taxableP: d.gstP ? d.taxableP || d.amountP - d.gstP : null,
           gstP: d.gstP || null,
           note: d.note ?? null,
         })

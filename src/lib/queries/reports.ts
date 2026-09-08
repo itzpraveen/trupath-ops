@@ -38,7 +38,26 @@ export async function gstSummary(entity: string, from: string, to: string) {
     .select({ tax: sql<number>`coalesce(sum(${shopifyOrders.taxP}),0)::float8`, orders: sql<number>`count(*)::int`, total: sql<number>`coalesce(sum(${shopifyOrders.totalP}),0)::float8` })
     .from(shopifyOrders)
     .where(and(isNull(shopifyOrders.cancelledAt), sql`(${shopifyOrders.createdAtShop} at time zone 'Asia/Kolkata')::date between ${from}::date and ${to}::date`, entity === "all" ? undefined : eq(shopifyOrders.entityId, entity)));
-  return { inputGst: Number(input?.gst ?? 0), inputTaxable: Number(input?.taxable ?? 0), inputBills: Number(input?.bills ?? 0), websiteTax: Number(web?.tax ?? 0), websiteOrders: Number(web?.orders ?? 0), websiteTotal: Number(web?.total ?? 0) };
+  // Output GST on sales entered by hand (wholesale, offline); website orders carry their tax on the order itself.
+  const [out] = await db
+    .select({
+      sales: sql<number>`coalesce(sum(${businessRecords.gstP}) filter (where ${businessRecords.kind} = 'sale'),0)::float8`,
+      returns: sql<number>`coalesce(sum(${businessRecords.gstP}) filter (where ${businessRecords.kind} = 'return'),0)::float8`,
+      invoices: sql<number>`count(*) filter (where ${businessRecords.kind} = 'sale' and ${businessRecords.gstP} > 0)::int`,
+    })
+    .from(businessRecords)
+    .where(and(isNull(businessRecords.voidedAt), sql`${businessRecords.kind} in ('sale','return')`, gte(businessRecords.workDate, from), lte(businessRecords.workDate, to), entity === "all" ? undefined : eq(businessRecords.entityId, entity)));
+  return {
+    inputGst: Number(input?.gst ?? 0),
+    inputTaxable: Number(input?.taxable ?? 0),
+    inputBills: Number(input?.bills ?? 0),
+    websiteTax: Number(web?.tax ?? 0),
+    websiteOrders: Number(web?.orders ?? 0),
+    websiteTotal: Number(web?.total ?? 0),
+    salesGst: Number(out?.sales ?? 0),
+    returnsGst: Number(out?.returns ?? 0),
+    salesInvoices: Number(out?.invoices ?? 0),
+  };
 }
 
 export async function stockValuation() {

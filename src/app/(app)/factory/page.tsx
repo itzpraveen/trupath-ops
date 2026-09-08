@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { and, asc, eq, isNull, lte, inArray } from "drizzle-orm";
+import { and, asc, eq, lte, inArray } from "drizzle-orm";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "cn";
 import { voidProduction } from "@/actions/factory";
@@ -47,7 +47,7 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
       .select({ id: jobWorkOrders.id, number: jobWorkOrders.number, dueDate: jobWorkOrders.dueDate, vendor: contacts.name, process: jobWorkOrders.process, orderedQty: jobWorkOrders.orderedQty, receivedQty: jobWorkOrders.receivedQty })
       .from(jobWorkOrders)
       .innerJoin(contacts, eq(contacts.id, jobWorkOrders.vendorId))
-      .where(and(inArray(jobWorkOrders.status, ["sent", "partial"]), lte(jobWorkOrders.dueDate, addDays(date, 3)), isNull(jobWorkOrders.billedAt)))
+      .where(and(inArray(jobWorkOrders.status, ["sent", "partial"]), lte(jobWorkOrders.dueDate, addDays(date, 3))))
       .orderBy(asc(jobWorkOrders.dueDate))
       .limit(5),
   ]);

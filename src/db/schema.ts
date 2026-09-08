@@ -360,6 +360,8 @@ export const jobWorkOrders = pgTable(
     orderedQty: integer().notNull().default(0),
     receivedQty: integer().notNull().default(0),
     rejectedQty: integer().notNull().default(0),
+    /** Accepted pieces already covered by a job worker's bill (bills can be recorded per batch). */
+    billedQty: integer().notNull().default(0),
     ratePerUnitP: money(),
     taxBps: integer().notNull().default(0),
     status: text().$type<JobWorkStatus>().notNull().default("draft"),
@@ -494,6 +496,10 @@ export type ShopifyLine = {
   quantity: number;
   priceP: number;
   discountP: number;
+  /** Units Shopify reports as fulfilled (split shipments fulfil a line in parts). */
+  fulfilledQty?: number;
+  /** Units already taken out of finished stock for this line, by the order sync or a dispatch in this app. */
+  deductedQty?: number;
 };
 
 export const shopifyOrders = pgTable(

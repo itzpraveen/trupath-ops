@@ -203,10 +203,12 @@ export default async function ReportsPage(props: PageProps<"/reports">) {
               </TableCard>
             </Section>
           ) : null}
-          <Section title="GST at a glance" description="Output tax from website orders (tax-inclusive prices) and input GST from bills with GST entered.">
+          <Section title="GST at a glance" description="Output tax from website orders (tax-inclusive prices, before refunds) and from other sales with GST entered; input GST from bills with GST entered. Indicative only.">
             <StatGrid className="lg:grid-cols-2">
-              <Stat label="Tax in website orders" value={formatINR(gst.websiteTax)} hint={`${gst.websiteOrders} orders · ${formatINR(gst.websiteTotal)} gross`} />
+              <Stat label="Output GST (website)" value={formatINR(gst.websiteTax)} hint={`${gst.websiteOrders} orders · ${formatINR(gst.websiteTotal)} gross`} />
+              <Stat label="Output GST (other sales)" value={formatINR(gst.salesGst - gst.returnsGst)} hint={`${gst.salesInvoices} invoices${gst.returnsGst ? ` · less ${formatINR(gst.returnsGst)} on returns` : ""}`} />
               <Stat label="Input GST on bills" value={formatINR(gst.inputGst)} hint={`${gst.inputBills} bills with GST`} />
+              <Stat label="Net GST (approx.)" value={formatINR(gst.websiteTax + gst.salesGst - gst.returnsGst - gst.inputGst)} hint="output minus input" tone={gst.websiteTax + gst.salesGst - gst.returnsGst - gst.inputGst > 0 ? "warning" : "default"} />
             </StatGrid>
           </Section>
         </div>

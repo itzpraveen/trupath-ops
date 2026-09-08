@@ -222,12 +222,16 @@ export async function billJobWork(_prev: ActionState, formData: FormData): Promi
     const amount = await db.transaction(async (tx) => {
       const [o] = await tx.select().from(jobWorkOrders).where(eq(jobWorkOrders.id, d.id)).for("update");
       if (!o) throw new Error("Order not found");
-      if (o.billedAt) throw new Error("A bill has already been recorded for this order");
-      const computed = Math.round(o.receivedQty * o.ratePerUnitP * (1 + o.taxBps / 10000));
+      if (o.status === "cancelled") throw new Error("This order was cancelled");
+      // Bills cover the accepted pieces received since the previous bill, so a job worker who delivers in batches can be billed per batch.
+      const unbilled = Math.max(0, o.receivedQty - o.billedQty);
+      if (unbilled <= 0) throw new Error(o.billedQty ? `All ${o.receivedQty} accepted pieces are billed already. Receive more pieces first.` : "Nothing to bill yet: receive pieces first.");
+      const computed = Math.round(unbilled * o.ratePerUnitP * (1 + o.taxBps / 10000));
       const amountP = d.amountP || computed;
       if (amountP <= 0) throw new Error("Enter the bill amount (no rate was set on the order)");
       const [vendor] = await tx.select({ name: contacts.name }).from(contacts).where(eq(contacts.id, o.vendorId)).limit(1);
       const number = await nextNumber(tx, "expense", d.workDate);
+      const batch = o.billedQty ? ` (pieces ${o.billedQty + 1}–${o.receivedQty})` : "";
       const [rec] = await tx
         .insert(businessRecords)
         .values({
@@ -244,13 +248,14 @@ export async function billJobWork(_prev: ActionState, formData: FormData): Promi
           taxableP: o.taxBps ? Math.round(amountP / (1 + o.taxBps / 10000)) : null,
           gstP: o.taxBps ? amountP - Math.round(amountP / (1 + o.taxBps / 10000)) : null,
           source: "jobwork",
-          sourceRef: `jobwork:${o.id}`,
-          note: `${vendor?.name ?? "Job worker"} · ${o.number} · ${o.receivedQty} × ${o.process}${d.note ? ` · ${d.note}` : ""}`,
+          // the first bill keeps the old key; later bills add the number of pieces billed before them
+          sourceRef: o.billedQty ? `jobwork:${o.id}:${o.billedQty}` : `jobwork:${o.id}`,
+          note: `${vendor?.name ?? "Job worker"} · ${o.number} · ${unbilled} × ${o.process}${batch}${d.note ? ` · ${d.note}` : ""}`,
           userId: user.id,
         })
         .returning({ id: businessRecords.id });
-      await tx.update(jobWorkOrders).set({ billedAt: new Date(), billRecordId: rec.id, status: o.status === "received" ? "closed" : o.status }).where(eq(jobWorkOrders.id, d.id));
-      await audit(tx, { userId: user.id, action: "bill", entityType: "jobwork", entityId: d.id, summary: `${o.number} billed ${formatINR(amountP)} (${number})` });
+      await tx.update(jobWorkOrders).set({ billedQty: o.receivedQty, billedAt: new Date(), billRecordId: rec.id, status: o.status === "received" ? "closed" : o.status }).where(eq(jobWorkOrders.id, d.id));
+      await audit(tx, { userId: user.id, action: "bill", entityType: "jobwork", entityId: d.id, summary: `${o.number} billed ${formatINR(amountP)} for ${unbilled} pcs (${number})` });
       return amountP;
     });
     revalidateJobWork(d.id);
@@ -260,7 +265,8 @@ export async function billJobWork(_prev: ActionState, formData: FormData): Promi
   }
 }
 
-const statusSchema = z.object({ id: zUuid("order"), status: zEnum(["closed", "cancelled", "sent"], "status"), reason: zOptional(300) });
+// "sent" is not settable here: sendJobWork does that and deducts the materials.
+const statusSchema = z.object({ id: zUuid("order"), status: zEnum(["closed", "cancelled"], "status"), reason: zOptional(300) });
 
 export async function setJobWorkStatus(_prev: ActionState, formData: FormData): Promise<ActionState> {
   try {
@@ -271,7 +277,7 @@ export async function setJobWorkStatus(_prev: ActionState, formData: FormData): 
     await db.transaction(async (tx) => {
       const [o] = await tx.select().from(jobWorkOrders).where(eq(jobWorkOrders.id, d.id)).for("update");
       if (!o) throw new Error("Order not found");
-      if (d.status === "sent" && o.status !== "draft") throw new Error("Only drafts can be sent");
+      if (o.status === "cancelled" || o.status === "closed") throw new Error(`This order is already ${o.status}`);
       await tx.update(jobWorkOrders).set({ status: d.status, note: d.reason ? `${o.note ? o.note + "\n" : ""}${d.status}: ${d.reason}` : o.note }).where(eq(jobWorkOrders.id, d.id));
       await audit(tx, { userId: user.id, action: d.status, entityType: "jobwork", entityId: d.id, summary: `${o.number} ${d.status}${d.reason ? `: ${d.reason}` : ""}` });
     });

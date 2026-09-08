@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
-import { asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, like } from "drizzle-orm";
 import { Pencil, Printer } from "lucide-react";
 import { db } from "@/db";
 import { businessRecords, contacts, jobWorkMaterials, jobWorkOrders, jobWorkReceipts, materials, products } from "@/db/schema";
@@ -35,10 +35,11 @@ export default async function JobWorkDetailPage(props: PageProps<"/jobwork/[id]"
   if (!row) notFound();
   const { o, vendor } = row;
   const editable = canEdit(user.role, "jobwork");
-  const [mats, receipts, bill] = await Promise.all([
+  const [mats, receipts, bills] = await Promise.all([
     db.select({ m: jobWorkMaterials, name: materials.name, unit: materials.unit }).from(jobWorkMaterials).innerJoin(materials, eq(materials.id, jobWorkMaterials.materialId)).where(eq(jobWorkMaterials.orderId, id)).orderBy(asc(materials.code)),
     db.select().from(jobWorkReceipts).where(eq(jobWorkReceipts.orderId, id)).orderBy(desc(jobWorkReceipts.receiptDate), desc(jobWorkReceipts.createdAt)),
-    o.billRecordId ? db.select().from(businessRecords).where(eq(businessRecords.id, o.billRecordId)).limit(1) : Promise.resolve([]),
+    // one bill per batch of accepted pieces: source refs are jobwork:<id> then jobwork:<id>:<pieces billed before>
+    db.select().from(businessRecords).where(and(like(businessRecords.sourceRef, `jobwork:${id}%`), isNull(businessRecords.voidedAt))).orderBy(asc(businessRecords.workDate), asc(businessRecords.createdAt)),
   ]);
 
   if (editable && sp.edit === "1" && o.status !== "closed" && o.status !== "cancelled") {
@@ -52,7 +53,9 @@ export default async function JobWorkDetailPage(props: PageProps<"/jobwork/[id]"
   }
 
   const pending = Math.max(0, o.orderedQty - o.receivedQty - o.rejectedQty);
-  const estimate = Math.round(o.receivedQty * o.ratePerUnitP * (1 + o.taxBps / 10000));
+  const unbilled = Math.max(0, o.receivedQty - o.billedQty);
+  const estimate = Math.round(unbilled * o.ratePerUnitP * (1 + o.taxBps / 10000));
+  const billedTotal = bills.reduce((s, b) => s + b.amountP, 0);
 
   return (
     <>
@@ -84,7 +87,7 @@ export default async function JobWorkDetailPage(props: PageProps<"/jobwork/[id]"
         <Stat label="Ordered" value={o.orderedQty} />
         <Stat label="Received" value={o.receivedQty} hint={o.rejectedQty ? `${o.rejectedQty} rejected` : undefined} tone="primary" />
         <Stat label="Pending" value={pending} tone={pending ? "warning" : "default"} />
-        <Stat label={o.billedAt ? "Billed" : "Estimated bill"} value={bill[0] ? formatINR(bill[0].amountP) : estimate ? formatINR(estimate) : "—"} hint={o.ratePerUnitP ? `${formatINR(o.ratePerUnitP)} per piece${o.taxBps ? ` + ${o.taxBps / 100}% GST` : ""}` : "no rate set"} />
+        <Stat label={bills.length ? "Billed" : "Estimated bill"} value={bills.length ? formatINR(billedTotal) : estimate ? formatINR(estimate) : "—"} hint={`${o.billedQty ? `${o.billedQty} of ${o.receivedQty} pcs billed · ` : ""}${o.ratePerUnitP ? `${formatINR(o.ratePerUnitP)} per piece${o.taxBps ? ` + ${o.taxBps / 100}% GST` : ""}` : "no rate set"}`} />
       </StatGrid>
       <div className="grid gap-6 lg:grid-cols-2">
         <Section title="Materials sent">
@@ -143,13 +146,18 @@ export default async function JobWorkDetailPage(props: PageProps<"/jobwork/[id]"
               </TableBody>
             </Table>
           </TableCard>
-          {bill[0] ? (
-            <p className="mt-2 text-sm">
-              Bill {bill[0].number} for {formatINR(bill[0].amountP)} recorded on {formatDate(bill[0].workDate)} ({bill[0].paymentTerms === "credit" ? "unpaid" : "paid"}).{" "}
+          {bills.length ? (
+            <div className="mt-2 space-y-1 text-sm">
+              {bills.map((b) => (
+                <p key={b.id}>
+                  Bill {b.number} for {formatINR(b.amountP)} recorded on {formatDate(b.workDate)} ({b.paymentTerms === "credit" ? "unpaid" : "paid"}).
+                </p>
+              ))}
+              {unbilled ? <p className="text-muted-foreground">{unbilled} accepted pieces not billed yet.</p> : null}
               <Link href="/payments?tab=payables" className="text-primary hover:underline">
                 See payables
               </Link>
-            </p>
+            </div>
           ) : null}
         </Section>
       </div>

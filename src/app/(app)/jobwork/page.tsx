@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { and, desc, eq, ilike, isNull, or, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, or, sql } from "drizzle-orm";
 import { Plus } from "lucide-react";
 import { cn } from "cn";
 import { db } from "@/db";
@@ -41,11 +41,10 @@ export default async function JobWorkPage(props: PageProps<"/jobwork">) {
       .select({
         open: sql<number>`count(*) filter (where ${jobWorkOrders.status} in ('sent','partial'))::int`,
         pendingPcs: sql<number>`coalesce(sum(greatest(${jobWorkOrders.orderedQty} - ${jobWorkOrders.receivedQty} - ${jobWorkOrders.rejectedQty}, 0)) filter (where ${jobWorkOrders.status} in ('sent','partial')),0)::int`,
-        unbilled: sql<number>`count(*) filter (where ${jobWorkOrders.receivedQty} > 0 and ${jobWorkOrders.billedAt} is null and ${jobWorkOrders.status} <> 'cancelled')::int`,
-        unbilledValue: sql<number>`coalesce(sum(${jobWorkOrders.receivedQty} * ${jobWorkOrders.ratePerUnitP} * (1 + ${jobWorkOrders.taxBps}/10000.0)) filter (where ${jobWorkOrders.billedAt} is null and ${jobWorkOrders.status} <> 'cancelled'),0)::float8`,
+        unbilled: sql<number>`count(*) filter (where ${jobWorkOrders.receivedQty} > ${jobWorkOrders.billedQty} and ${jobWorkOrders.status} <> 'cancelled')::int`,
+        unbilledValue: sql<number>`coalesce(sum((${jobWorkOrders.receivedQty} - ${jobWorkOrders.billedQty}) * ${jobWorkOrders.ratePerUnitP} * (1 + ${jobWorkOrders.taxBps}/10000.0)) filter (where ${jobWorkOrders.receivedQty} > ${jobWorkOrders.billedQty} and ${jobWorkOrders.status} <> 'cancelled'),0)::float8`,
       })
-      .from(jobWorkOrders)
-      .where(isNull(jobWorkOrders.billedAt)),
+      .from(jobWorkOrders),
   ]);
   const editable = canEdit(user.role, "jobwork");
   const params = { status, q: q || undefined };
@@ -127,7 +126,7 @@ export default async function JobWorkPage(props: PageProps<"/jobwork">) {
                   <TableCell className="hidden lg:table-cell">{formatDate(o.dueDate, "d MMM")}</TableCell>
                   <TableCell>
                     <StatusBadge tone={JOBWORK_TONE[o.status]}>{o.status === "sent" ? "with job worker" : o.status}</StatusBadge>
-                    {o.billedAt ? <span className="block text-xs text-muted-foreground">billed</span> : null}
+                    {o.billedQty > 0 ? <span className="block text-xs text-muted-foreground">{o.billedQty >= o.receivedQty ? "billed" : `billed ${o.billedQty} of ${o.receivedQty}`}</span> : null}
                   </TableCell>
                 </TableRow>
               ))

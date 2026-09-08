@@ -114,11 +114,9 @@ export function RecordFields({ kind, options, defaults, defaultEntity, defaultDa
             ))}
           </NativeSelect>
         </Field>
-        {kind === "expense" || kind === "purchase" ? (
-          <Field label="GST in this bill (₹)" name="gstP" error={fe.gstP} hint="Leave blank if no GST bill.">
-            <Input id="gstP" name="gstP" inputMode="decimal" defaultValue={defaults?.gstP ? toRupees(defaults.gstP) : ""} />
-          </Field>
-        ) : null}
+        <Field label={kind === "sale" || kind === "return" ? "GST included (₹)" : "GST in this bill (₹)"} name="gstP" error={fe.gstP} hint={kind === "sale" || kind === "return" ? "Leave blank unless this is a GST invoice." : "Leave blank if no GST bill."}>
+          <Input id="gstP" name="gstP" inputMode="decimal" defaultValue={defaults?.gstP ? toRupees(defaults.gstP) : ""} />
+        </Field>
       </FormRow>
       <Field label="Note" name="note" error={fe.note}>
         <Textarea id="note" name="note" rows={2} defaultValue={defaults?.note ?? ""} placeholder={kind === "return" ? "Reason for the return" : "Anything worth remembering"} />
