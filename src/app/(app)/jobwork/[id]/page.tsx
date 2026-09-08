@@ -4,7 +4,7 @@ import { notFound } from "next/navigation";
 import { and, asc, desc, eq, isNull, like } from "drizzle-orm";
 import { Pencil, Printer } from "lucide-react";
 import { db } from "@/db";
-import { businessRecords, contacts, jobWorkMaterials, jobWorkOrders, jobWorkReceipts, materials, products } from "@/db/schema";
+import { businessRecords, contacts, jobWorkMaterials, jobWorkOrders, jobWorkReceipts, materials, products, uploads } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
 import { formatDate, todayIST } from "@/lib/dates";
 import { formatINR, formatQty } from "@/lib/money";
@@ -15,6 +15,7 @@ import { PageHeader, Section } from "@/components/app/page-header";
 import { Stat, StatGrid } from "@/components/app/stat";
 import { JOBWORK_TONE, StatusBadge } from "@/components/app/status-badge";
 import { Table, TableBody, TableCard, TableCell, TableEmpty, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
+import { PhotoUploader } from "@/components/app/photo-uploader";
 import { JobWorkActions } from "../jobwork-actions";
 import { JobWorkForm } from "../jobwork-form";
 
@@ -35,11 +36,12 @@ export default async function JobWorkDetailPage(props: PageProps<"/jobwork/[id]"
   if (!row) notFound();
   const { o, vendor } = row;
   const editable = canEdit(user.role, "jobwork");
-  const [mats, receipts, bills] = await Promise.all([
+  const [mats, receipts, bills, files] = await Promise.all([
     db.select({ m: jobWorkMaterials, name: materials.name, unit: materials.unit }).from(jobWorkMaterials).innerJoin(materials, eq(materials.id, jobWorkMaterials.materialId)).where(eq(jobWorkMaterials.orderId, id)).orderBy(asc(materials.code)),
     db.select().from(jobWorkReceipts).where(eq(jobWorkReceipts.orderId, id)).orderBy(desc(jobWorkReceipts.receiptDate), desc(jobWorkReceipts.createdAt)),
     // one bill per batch of accepted pieces: source refs are jobwork:<id> then jobwork:<id>:<pieces billed before>
     db.select().from(businessRecords).where(and(like(businessRecords.sourceRef, `jobwork:${id}%`), isNull(businessRecords.voidedAt))).orderBy(asc(businessRecords.workDate), asc(businessRecords.createdAt)),
+    db.select({ id: uploads.id, fileName: uploads.fileName, size: uploads.size, createdAt: uploads.createdAt }).from(uploads).where(and(eq(uploads.kind, "jobwork_file"), eq(uploads.refId, id))).orderBy(desc(uploads.createdAt)),
   ]);
 
   if (editable && sp.edit === "1" && o.status !== "closed" && o.status !== "cancelled") {
@@ -159,6 +161,11 @@ export default async function JobWorkDetailPage(props: PageProps<"/jobwork/[id]"
               </Link>
             </div>
           ) : null}
+        </Section>
+      </div>
+      <div className="mt-6">
+        <Section title="Files" description="Challans, photos of the pieces, the job worker's bill.">
+          <PhotoUploader kind="jobwork_file" refId={o.id} photos={files.map((f) => ({ ...f, createdAt: f.createdAt.toISOString() }))} editable={editable && o.status !== "cancelled"} />
         </Section>
       </div>
       <div className="mt-6 grid gap-6 lg:grid-cols-2">

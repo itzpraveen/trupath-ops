@@ -19,7 +19,7 @@ Built with Next.js 16 (App Router, server actions), TypeScript, Tailwind v4 + sh
 | Area | Pages |
 | --- | --- |
 | Home | Today, this month, 30-day chart, channel split, website orders, factory today, low stock, recent entries |
-| Sales & money | Sales & expenses ledger (brand / factory books), Website orders, Payments (cash & bank, receivables, payables), Customers & vendors, Reports |
+| Sales & money | Sales & expenses ledger (brand / factory books) with bill photos attached to entries, Website orders, Payments (cash & bank, receivables, payables), Customers & vendors, Reports |
 | Stock & dispatch | Finished stock, Products (catalogue), Dispatch with photos and printable challan |
 | Factory | Daily register (production + tap-to-mark attendance), Production history, Raw materials, Material recipes, Attendance grid with wages, Staff, Job work with printable challan |
 | Admin | Company details, Logins, Shopify connection, Lists & brands |
@@ -99,7 +99,8 @@ The in-process scheduler (`SHOPIFY_SYNC_MINUTES`) is enough on Render. If you ho
 - Each website order line remembers how many units left stock (`deductedQty` in `shopify_orders.line_items`), so partial fulfilments, dispatches created from orders in this app, cancellations and dispatch returns never deduct or restore twice. The planner is pure (`src/lib/order-stock.ts`) and unit-tested.
 - Job work bills cover the accepted pieces received since the previous bill (`billed_qty` on the order), so a job worker delivering in batches is billed per batch.
 - Synced records carry a `source_ref` (e.g. `shopify:order:123:sale`) that makes repeated syncs idempotent.
-- Photos are stored in Postgres (`uploads`), resized in the browser first. Move to S3/R2 if volumes grow.
+- Photos and PDFs (dispatch photos, job work files, bills on ledger entries) are stored in Postgres (`uploads`), resized in the browser first, and served only to roles that may view the module they belong to. Move to S3/R2 if volumes grow.
+- Raw-material movements carry the date entered in the dialog (`work_date`), so backdated usage and counts show under the right day; `created_at` still records when it was typed in.
 
 ## Backups
 

@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { requireUser } from "@/lib/auth";
 import { getEntities } from "@/lib/queries/common";
 import { Section } from "@/components/app/page-header";
 import { EntityForm } from "./entity-form";
@@ -6,6 +7,7 @@ import { EntityForm } from "./entity-form";
 export const metadata: Metadata = { title: "Settings" };
 
 export default async function SettingsPage() {
+  await requireUser("settings");
   const entities = await getEntities();
   return (
     <div className="grid gap-6 lg:grid-cols-2">

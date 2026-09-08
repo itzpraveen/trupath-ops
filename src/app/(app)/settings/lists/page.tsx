@@ -4,6 +4,7 @@ import { cn } from "cn";
 import { toggleCategory } from "@/actions/settings";
 import { db } from "@/db";
 import { brands, categories, type CategoryKind } from "@/db/schema";
+import { requireUser } from "@/lib/auth";
 import { InlineAction } from "@/components/app/inline-action";
 import { Section } from "@/components/app/page-header";
 import { AddCategoryDialog, BrandDialog } from "./list-dialogs";
@@ -17,6 +18,7 @@ const KINDS: { kind: CategoryKind; label: string; help: string }[] = [
 ];
 
 export default async function ListsPage() {
+  await requireUser("settings");
   const [cats, brandRows] = await Promise.all([db.select().from(categories).orderBy(asc(categories.kind), asc(categories.sortOrder), asc(categories.name)), db.select().from(brands).orderBy(asc(brands.sortOrder), asc(brands.name))]);
   return (
     <div className="space-y-8">

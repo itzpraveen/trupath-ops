@@ -1,8 +1,11 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { Download, Pencil } from "lucide-react";
 import { cn } from "cn";
 import { voidRecord } from "@/actions/records";
+import { db } from "@/db";
+import { uploads } from "@/db/schema";
 import { requireUser } from "@/lib/auth";
 import { monthKey, monthRange, formatDate, todayIST } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
@@ -19,6 +22,7 @@ import { PageHeader } from "@/components/app/page-header";
 import { Stat, StatGrid } from "@/components/app/stat";
 import { StatusBadge } from "@/components/app/status-badge";
 import { Table, TableBody, TableCard, TableCell, TableEmpty, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
+import { RecordAttachments } from "./record-attachments";
 import { AddRecordButtons, EditRecordDialog } from "./record-dialogs";
 
 export const metadata: Metadata = { title: "Sales & expenses" };
@@ -56,6 +60,14 @@ export default async function SalesPage(props: PageProps<"/sales">) {
   };
   const editable = canEdit(user.role, "sales");
   const pages = Math.max(1, Math.ceil(list.total / list.pageSize));
+  const files = list.rows.length
+    ? await db
+        .select({ id: uploads.id, refId: uploads.refId, fileName: uploads.fileName, size: uploads.size, createdAt: uploads.createdAt })
+        .from(uploads)
+        .where(and(eq(uploads.kind, "expense_bill"), inArray(uploads.refId, list.rows.map((r) => r.record.id))))
+        .orderBy(desc(uploads.createdAt))
+    : [];
+  const filesFor = (recordId: string) => files.filter((f) => f.refId === recordId).map((f) => ({ id: f.id, fileName: f.fileName, size: f.size, createdAt: f.createdAt.toISOString() }));
 
   return (
     <>
@@ -125,12 +137,13 @@ export default async function SalesPage(props: PageProps<"/sales">) {
               <TableHead className="hidden lg:table-cell">Paid via</TableHead>
               <TableHead className="text-right">Amount</TableHead>
               <TableHead className="hidden lg:table-cell">By</TableHead>
+              <TableHead className="w-10" />
               {editable ? <TableHead className="w-24" /> : null}
             </TableRow>
           </TableHeader>
           <TableBody>
             {list.rows.length === 0 ? (
-              <TableEmpty colSpan={9}>No entries for this filter. Use the buttons above to add today&apos;s sales and expenses.</TableEmpty>
+              <TableEmpty colSpan={10}>No entries for this filter. Use the buttons above to add today&apos;s sales and expenses.</TableEmpty>
             ) : (
               list.rows.map(({ record: r, contactName, userName }) => (
                 <TableRow key={r.id} className={cn(r.voidedAt && "opacity-50")}>
@@ -158,6 +171,9 @@ export default async function SalesPage(props: PageProps<"/sales">) {
                     <Amount paise={r.amountP} tone={r.kind === "sale" ? "in" : "out"} className="font-medium" />
                   </TableCell>
                   <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">{r.source === "shopify" ? "Website" : userName ?? "—"}</TableCell>
+                  <TableCell className="px-1">
+                    <RecordAttachments recordId={r.id} label={r.number ?? r.reference ?? r.kind} files={filesFor(r.id)} editable={editable && !r.voidedAt} />
+                  </TableCell>
                   {editable ? (
                     <TableCell>
                       {!r.voidedAt ? (

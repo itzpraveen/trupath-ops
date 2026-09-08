@@ -6,7 +6,7 @@ import { z } from "zod";
 import { db } from "@/db";
 import { brands, categories, entities, sessions, users, ROLES, type CategoryKind } from "@/db/schema";
 import { audit } from "@/lib/audit";
-import { getCurrentUser, hashPassword, requireEditor, verifyPassword, AuthError } from "@/lib/auth";
+import { getCurrentUser, hashPassword, requireEditor, verifyPassword, AuthError, revokeOtherSessions } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zEnum, zOptional, zOptionalUuid, zRequired, type ActionState } from "@/lib/forms";
 import { entityExists } from "@/lib/queries/common";
 
@@ -117,8 +117,9 @@ export async function changeOwnPassword(_prev: ActionState, formData: FormData):
     const [row] = await db.select({ passwordHash: users.passwordHash }).from(users).where(eq(users.id, me.id)).limit(1);
     if (!row || !verifyPassword(parsed.data.currentPassword, row.passwordHash)) return { error: "Current password is incorrect", fieldErrors: { currentPassword: ["Incorrect"] } };
     await db.update(users).set({ passwordHash: hashPassword(parsed.data.newPassword) }).where(eq(users.id, me.id));
+    await revokeOtherSessions(me.id);
     await audit(db, { userId: me.id, action: "password", entityType: "user", entityId: me.id, summary: "Changed own password" });
-    return { ok: true, message: "Password changed" };
+    return { ok: true, message: "Password changed. Other devices have been signed out." };
   } catch (err) {
     return { error: errorMessage(err) };
   }

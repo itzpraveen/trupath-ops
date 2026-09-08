@@ -3,6 +3,7 @@ import { desc } from "drizzle-orm";
 import { disconnectShopify, pushAllStock, registerShopifyWebhooks, testShopify } from "@/actions/shopify";
 import { db } from "@/db";
 import { syncRuns } from "@/db/schema";
+import { requireUser } from "@/lib/auth";
 import { formatDate, formatDateTime } from "@/lib/dates";
 import { getBrands, getCategories, getEntities } from "@/lib/queries/common";
 import { listStores, missingScopes, shopifyApiVersion, storeCredentials, storeToken } from "@/lib/shopify-oauth";
@@ -18,6 +19,7 @@ import { StoreDialog } from "./store-dialog";
 export const metadata: Metadata = { title: "Shopify" };
 
 export default async function ShopifySettingsPage(props: PageProps<"/settings/shopify">) {
+  await requireUser("settings");
   const sp = await props.searchParams;
   const [stores, runs, brands, entities, channels] = await Promise.all([listStores(), db.select().from(syncRuns).orderBy(desc(syncRuns.startedAt)).limit(12), getBrands(), getEntities(), getCategories("channel")]);
   const appUrl = process.env.APP_URL?.replace(/\/$/, "") || "https://<your-app>.onrender.com";

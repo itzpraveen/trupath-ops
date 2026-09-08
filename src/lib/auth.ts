@@ -4,7 +4,7 @@ import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createHash, randomBytes } from "node:crypto";
 import { hashPassword, verifyPassword } from "@/lib/password";
-import { and, eq, gt, lt } from "drizzle-orm";
+import { and, eq, gt, lt, ne } from "drizzle-orm";
 import { db } from "@/db";
 import { sessions, users, type Role, type SafeUser } from "@/db/schema";
 import { canEdit, canView, type ModuleKey } from "@/lib/permissions";
@@ -30,6 +30,13 @@ export async function createSession(userId: string, userAgent?: string | null) {
     path: "/",
     expires: expiresAt,
   });
+}
+
+/** Sign the user out everywhere except the device making this request. */
+export async function revokeOtherSessions(userId: string) {
+  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  const keep = token ? tokenId(token) : null;
+  await db.delete(sessions).where(keep ? and(eq(sessions.userId, userId), ne(sessions.id, keep)) : eq(sessions.userId, userId));
 }
 
 export async function destroySession() {
