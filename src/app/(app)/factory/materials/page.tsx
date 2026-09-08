@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { asc, ilike, or, eq, and } from "drizzle-orm";
+import { asc, ilike, or, eq, and, sql } from "drizzle-orm";
 import { Download } from "lucide-react";
 import { cn } from "cn";
 import { db } from "@/db";
@@ -35,7 +35,8 @@ export default async function MaterialsPage(props: PageProps<"/factory/materials
   const editable = canEdit(user.role, "materials");
   const low = rows.filter((m) => m.active && m.minQty > 0 && m.qty <= m.minQty);
   const value = rows.reduce((s, m) => s + Math.round(m.qty * m.costP), 0);
-  const nextCode = `RM-${String(rows.reduce((max, m) => Math.max(max, Number(m.code.replace(/\D/g, "")) || 0), 0) + 1).padStart(3, "0")}`;
+  const [{ maxCode }] = await db.select({ maxCode: sql<number>`coalesce(max(nullif(regexp_replace(${materials.code}, '[^0-9]', '', 'g'), '')::int), 0)` }).from(materials);
+  const nextCode = `RM-${String(Number(maxCode) + 1).padStart(3, "0")}`;
   const today = todayIST();
 
   return (

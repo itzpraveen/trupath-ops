@@ -78,7 +78,7 @@ export async function createJobWork(_prev: ActionState, formData: FormData): Pro
         .returning({ id: jobWorkOrders.id });
       if (mats.length) await tx.insert(jobWorkMaterials).values(mats.map((m) => ({ orderId: row.id, ...m })));
       if (d.sendNow) {
-        for (const m of mats) await adjustMaterial(tx, { materialId: m.materialId, kind: "jobwork_out", qty: -m.qtySent, refType: "jobwork", refId: number, note: `Sent to ${vendor.name} (${number})`, userId: user.id });
+        for (const m of mats) await adjustMaterial(tx, { materialId: m.materialId, kind: "jobwork_out", qty: -m.qtySent, workDate: d.workDate, refType: "jobwork", refId: number, note: `Sent to ${vendor.name} (${number})`, userId: user.id });
       }
       await audit(tx, { userId: user.id, action: "create", entityType: "jobwork", entityId: row.id, summary: `${number} to ${vendor.name}: ${d.orderedQty} × ${d.process ?? "Stitching"}` });
       return row.id;

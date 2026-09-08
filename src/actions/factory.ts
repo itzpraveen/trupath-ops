@@ -60,7 +60,7 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
           for (const line of lines) {
             const need = round3(line.qtyPerUnit * d.qty * (1 + line.wastagePct / 100));
             if (need <= 0) continue;
-            await adjustMaterial(tx, { materialId: line.materialId, kind: "issue", qty: -need, unitCostP: line.costP, refType: "production", refId: number, note: `${number}: ${d.qty} × ${product.name}${product.variant ? ` ${product.variant}` : ""}`, userId: user.id });
+            await adjustMaterial(tx, { materialId: line.materialId, kind: "issue", qty: -need, unitCostP: line.costP, workDate: d.workDate, refType: "production", refId: number, note: `${number}: ${d.qty} × ${product.name}${product.variant ? ` ${product.variant}` : ""}`, userId: user.id });
             materialCostP += Math.round(need * line.costP);
             consumed.push(`${need} ${line.unit} ${line.name}`);
           }

@@ -239,6 +239,8 @@ export const materialMovements = pgTable(
     beforeQty: numeric({ precision: 14, scale: 3, mode: "number" }).notNull(),
     afterQty: numeric({ precision: 14, scale: 3, mode: "number" }).notNull(),
     unitCostP: bigint({ mode: "number" }),
+    /** The day the movement belongs to (entered by the user); createdAt is when it was recorded. */
+    workDate: date().notNull().default(sql`current_date`),
     refType: text(),
     refId: text(),
     note: text(),
@@ -633,11 +635,12 @@ export const dispatchItems = pgTable("dispatch_items", {
   qty: integer().notNull(),
 });
 
+export type UploadKind = "dispatch_photo" | "jobwork_file" | "expense_bill";
 export const uploads = pgTable(
   "uploads",
   {
     id: id(),
-    kind: text().$type<"dispatch_photo" | "jobwork_file" | "expense_bill">().notNull(),
+    kind: text().$type<UploadKind>().notNull(),
     refId: uuid().notNull(),
     fileName: text().notNull(),
     mime: text().notNull(),

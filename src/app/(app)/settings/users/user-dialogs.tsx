@@ -73,6 +73,8 @@ export function EditUserDialog({ user, isSelf }: { user: SafeUser; isSelf: boole
             <Field label="New password" name="password" error={fe.password} hint="Leave blank to keep the current password. Setting one signs them out everywhere.">
               <Input id="password" name="password" type="text" autoComplete="new-password" />
             </Field>
+            {/* a disabled checkbox is not submitted, so carry the value for your own login explicitly */}
+            {isSelf ? <input type="hidden" name="active" value="on" /> : null}
             <label className="flex items-center gap-2 text-sm">
               <input type="checkbox" name="active" defaultChecked={user.active} disabled={isSelf} className="size-4 accent-primary" />
               Can sign in

@@ -75,7 +75,7 @@ export default async function MaterialPage(props: PageProps<"/factory/materials/
               ) : (
                 moves.map(({ mv, userName }) => (
                   <TableRow key={mv.id}>
-                    <TableCell className="whitespace-nowrap text-muted-foreground">{formatDateTime(mv.createdAt)}</TableCell>
+                    <TableCell className="whitespace-nowrap text-muted-foreground" title={`Recorded ${formatDateTime(mv.createdAt)}`}>{formatDate(mv.workDate, "d MMM yyyy")}</TableCell>
                     <TableCell>
                       {KIND_LABEL[mv.kind] ?? mv.kind}
                       {mv.note ? <span className="block max-w-72 truncate text-xs text-muted-foreground">{mv.note}</span> : null}

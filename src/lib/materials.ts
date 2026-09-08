@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { Tx } from "@/db";
 import { materialMovements, materials, type MaterialMovementKind } from "@/db/schema";
+import { todayIST } from "@/lib/dates";
 
 export const round3 = (n: number) => Math.round(n * 1000) / 1000;
 
@@ -15,6 +16,8 @@ export async function adjustMaterial(
     kind: MaterialMovementKind;
     qty: number;
     unitCostP?: number | null;
+    /** YYYY-MM-DD the movement belongs to; defaults to today in India. */
+    workDate?: string;
     refType?: string;
     refId?: string;
     note?: string;
@@ -45,6 +48,7 @@ export async function adjustMaterial(
     beforeQty: before,
     afterQty: after,
     unitCostP: input.unitCostP ?? null,
+    workDate: input.workDate ?? todayIST(),
     refType: input.refType ?? null,
     refId: input.refId ?? null,
     note: input.note ?? null,

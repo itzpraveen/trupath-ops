@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { and, eq, gte, lte } from "drizzle-orm";
+import { and, desc, eq, gte, inArray, lte, or } from "drizzle-orm";
 import { Download } from "lucide-react";
 import { cn } from "cn";
 import { db } from "@/db";
@@ -32,10 +32,15 @@ export default async function AttendancePage(props: PageProps<"/factory/attendan
   const daysInMonth = Number(to.slice(8, 10));
   const days = Array.from({ length: daysInMonth }, (_, i) => `${month}-${String(i + 1).padStart(2, "0")}`);
 
-  const [staff, marks] = await Promise.all([
-    db.select().from(employees).where(eq(employees.active, true)).orderBy(employees.code),
-    db.select().from(attendance).where(and(gte(attendance.workDate, from), lte(attendance.workDate, to))),
-  ]);
+  const marks = await db.select().from(attendance).where(and(gte(attendance.workDate, from), lte(attendance.workDate, to)));
+  // current staff, plus anyone who left but was marked this month (their wages are still due)
+  const markedIds = [...new Set(marks.map((m) => m.employeeId))];
+  const staff = await db
+    .select()
+    .from(employees)
+    .where(markedIds.length ? or(eq(employees.active, true), inArray(employees.id, markedIds)) : eq(employees.active, true))
+    .orderBy(desc(employees.active), employees.code);
+  const activeCount = staff.filter((s) => s.active).length;
   const byEmp = new Map<string, Map<string, string>>();
   for (const m of marks) {
     if (!byEmp.has(m.employeeId)) byEmp.set(m.employeeId, new Map());
@@ -61,10 +66,10 @@ export default async function AttendancePage(props: PageProps<"/factory/attendan
         <MonthNav month={month} basePath="/factory/attendance" />
       </PageHeader>
       <StatGrid className="mb-6">
-        <Stat label="Staff" value={staff.length} />
+        <Stat label="Staff" value={activeCount} hint={staff.length > activeCount ? `${staff.length - activeCount} left during the month` : undefined} />
         <Stat label="Present days" value={totalPresentDays} hint="half days count as ½" />
         <Stat label="Wages payable" value={formatINR(totalPayable)} hint="daily wage × present days" />
-        <Stat label="Marked today" value={marks.filter((m) => m.workDate === today).length} hint={`of ${staff.length}`} />
+        <Stat label="Marked today" value={marks.filter((m) => m.workDate === today).length} hint={`of ${activeCount}`} />
       </StatGrid>
       <div className="overflow-x-auto rounded-xl border bg-card">
         <table className="w-full min-w-max border-collapse text-sm">
@@ -98,6 +103,7 @@ export default async function AttendancePage(props: PageProps<"/factory/attendan
                 <tr key={s.id} className="border-b last:border-0">
                   <td className="sticky left-0 z-10 bg-card px-3 py-1.5 font-medium whitespace-nowrap">
                     {s.name} <span className="text-xs font-normal text-muted-foreground">#{s.code}</span>
+                    {!s.active ? <span className="ml-1 text-xs font-normal text-muted-foreground">(left)</span> : null}
                   </td>
                   {days.map((d) => {
                     const st = map.get(d);

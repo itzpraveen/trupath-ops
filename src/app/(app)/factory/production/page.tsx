@@ -10,6 +10,7 @@ import { requireUser } from "@/lib/auth";
 import { formatDate, monthKey, monthRange } from "@/lib/dates";
 import { formatINR } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
+import { getBrands } from "@/lib/queries/common";
 import { pick, qs } from "@/lib/url";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { ConfirmAction } from "@/components/app/confirm-action";
@@ -19,13 +20,14 @@ import { Stat, StatGrid } from "@/components/app/stat";
 import { Table, TableBody, TableCard, TableCell, TableEmpty, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
 
 export const metadata: Metadata = { title: "Production" };
-const BRAND: Record<string, string> = { babygambling: "Baby Gambling", firstbon: "Firstbon" };
 
 export default async function ProductionPage(props: PageProps<"/factory/production">) {
   const user = await requireUser("factory");
   const sp = await props.searchParams;
   const month = /^\d{4}-\d{2}$/.test(String(sp.month ?? "")) ? String(sp.month) : monthKey();
-  const brand = pick(sp.brand, ["all", "babygambling", "firstbon"], "all");
+  const brands = await getBrands();
+  const BRAND: Record<string, string> = Object.fromEntries(brands.map((b) => [b.id, b.name]));
+  const brand = pick(sp.brand, ["all", ...brands.map((b) => b.id)], "all");
   const [from, to] = monthRange(month);
   const where = and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to), brand === "all" ? undefined : eq(productionEntries.brandId, brand));
   const [rows, byProduct] = await Promise.all([
@@ -59,11 +61,7 @@ export default async function ProductionPage(props: PageProps<"/factory/producti
       </PageHeader>
       <div className="mb-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap gap-1 rounded-lg bg-muted p-1 text-sm">
-          {[
-            ["all", "All brands"],
-            ["babygambling", "Baby Gambling"],
-            ["firstbon", "Firstbon"],
-          ].map(([v, l]) => (
+          {[["all", "All brands"], ...brands.map((b) => [b.id, b.name] as [string, string])].map(([v, l]) => (
             <Link key={v} href={`/factory/production${qs({ month, brand: v })}`} className={cn("rounded-md px-3 py-1", brand === v ? "bg-card font-medium shadow-sm" : "text-muted-foreground hover:text-foreground")}>
               {l}
             </Link>

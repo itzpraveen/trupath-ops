@@ -4,7 +4,7 @@ import { and, eq, ne } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { bomLines, boms, businessRecords, materials, products } from "@/db/schema";
+import { bomLines, boms, businessRecords, materials, productionEntries, products } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { todayIST } from "@/lib/dates";
@@ -116,9 +116,11 @@ export async function recordMaterialMovement(_prev: ActionState, formData: FormD
         kind: d.kind,
         qty: d.kind === "count" ? d.qty : delta,
         unitCostP: d.unitCostP || null,
+        workDate,
         refType: d.kind === "purchase" ? "purchase" : "manual",
-        refId,
-        note: d.note ?? (d.kind === "purchase" && d.reference ? `Bill ${d.reference}` : undefined),
+        // the expense number when one was posted, else the supplier's bill number
+        refId: refId ?? (d.kind === "purchase" && d.reference ? `Bill ${d.reference}` : undefined),
+        note: d.note,
         userId: user.id,
       });
       if (d.kind === "purchase" && d.unitCostP > 0) {
@@ -158,9 +160,12 @@ export async function saveBom(_prev: ActionState, formData: FormData): Promise<A
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     const ids = d.materialId ?? [];
-    const lines = ids
+    const listed = ids
       .map((materialId, i) => ({ materialId, qtyPerUnit: round3(Number(d.qtyPerUnit?.[i] ?? 0)), wastagePct: Math.max(0, Number(d.wastagePct?.[i] ?? 0) || 0) }))
-      .filter((l) => /^[0-9a-f-]{36}$/i.test(l.materialId) && l.qtyPerUnit > 0);
+      .filter((l) => /^[0-9a-f-]{36}$/i.test(l.materialId));
+    // a chosen material with no quantity is a mistake, not something to drop quietly
+    if (listed.some((l) => !(l.qtyPerUnit > 0))) return { error: "Enter the quantity per unit for every material, or remove the empty line", fieldErrors: { qtyPerUnit: ["Missing quantity"] } };
+    const lines = listed;
     if (!lines.length) return { error: "Add at least one material with a quantity per unit" };
     const seen = new Set<string>();
     for (const l of lines) {
@@ -197,8 +202,14 @@ export async function deleteBom(_prev: ActionState, formData: FormData): Promise
     const user = await requireEditor("materials");
     const id = String(formData.get("id") ?? "");
     if (!/^[0-9a-f-]{36}$/i.test(id)) return { error: "Recipe not found" };
-    await db.delete(boms).where(eq(boms.id, id));
-    await audit(db, { userId: user.id, action: "delete", entityType: "bom", entityId: id, summary: "Deleted recipe" });
+    await db.transaction(async (tx) => {
+      const [bom] = await tx.select({ id: boms.id }).from(boms).where(eq(boms.id, id)).limit(1);
+      if (!bom) throw new Error("Recipe not found");
+      // production entries keep their recorded material usage; they just stop pointing at the recipe
+      await tx.update(productionEntries).set({ bomId: null }).where(eq(productionEntries.bomId, id));
+      await tx.delete(boms).where(eq(boms.id, id));
+      await audit(tx, { userId: user.id, action: "delete", entityType: "bom", entityId: id, summary: "Deleted recipe" });
+    });
     revalidateMaterials();
     return { ok: true, message: "Recipe deleted" };
   } catch (err) {
