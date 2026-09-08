@@ -103,6 +103,19 @@ await step("mark attendance with one tap", async () => {
   if (state !== "true") throw new Error("attendance not persisted, data-on=" + state);
   await shot("06-factory-after");
 });
+await step("staff who left stay on this month's attendance sheet", async () => {
+  await page.goto(`${BASE}/factory/employees`);
+  const row = page.getByRole("row").filter({ hasText: "Hanan" }).first();
+  await row.getByRole("button", { name: "Edit" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Currently working here").uncheck();
+  await dlg.getByRole("button", { name: "Save changes" }).click();
+  await waitToast("Staff details saved");
+  await page.goto(`${BASE}/factory/attendance`);
+  const sheetRow = page.locator("tr").filter({ hasText: "Hanan" }).first();
+  await sheetRow.waitFor();
+  await sheetRow.getByText("(left)").waitFor();
+});
 await step("stock reflects production", async () => {
   await page.goto(`${BASE}/stock?q=Sleepy+Bear&instock=1`);
   await page.getByRole("row").filter({ hasText: "Nest Bed" }).first().waitFor();
@@ -140,6 +153,26 @@ await step("production with recipe consumes material", async () => {
   await dlg.getByLabel("Quantity made").fill("2");
   await dlg.getByRole("button", { name: "Record production" }).click();
   await waitToast("Materials used");
+});
+await step("a recipe that production used can still be deleted", async () => {
+  await page.goto(`${BASE}/factory/boms`);
+  const row = page.getByRole("row").filter({ hasText: "Baby Blanket Sleepy Bear" }).first();
+  await row.getByRole("button", { name: "Delete" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByRole("button", { name: "Delete" }).click();
+  await waitToast("Recipe deleted");
+});
+await step("attach a bill photo to the expense", async () => {
+  await page.goto(`${BASE}/sales?kind=expense`);
+  const row = page.getByRole("row").filter({ hasText: "E2E tea" }).first();
+  await row.getByRole("button", { name: /^Attachments for/ }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByText("Files for").waitFor();
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==", "base64");
+  await dlg.locator('input[type="file"]').setInputFiles({ name: "bill.png", mimeType: "image/png", buffer: png });
+  await waitToast("File added");
+  await dlg.locator("img[alt='bill.png']").waitFor({ timeout: 15000 });
+  await page.keyboard.press("Escape");
 });
 await step("create and ship a dispatch", async () => {
   await page.goto(`${BASE}/dispatch/new`);
@@ -225,6 +258,15 @@ await step("settings: add a login", async () => {
   await dlg.getByRole("button", { name: "Create login" }).click();
   await waitToast("can now sign in");
   await shot("15-settings-users");
+});
+await step("owner can save their own login", async () => {
+  await page.goto(`${BASE}/settings/users`);
+  const row = page.getByRole("row").filter({ hasText: OWNER_EMAIL }).first();
+  await row.getByRole("button", { name: "Edit" }).click();
+  const dlg = page.getByRole("dialog");
+  await dlg.getByLabel("Name").fill("Owner");
+  await dlg.getByRole("button", { name: "Save" }).click();
+  await waitToast("Login updated");
 });
 await step("shopify settings page", async () => {
   await page.goto(`${BASE}/settings/shopify`);
