@@ -34,6 +34,7 @@ const schema = z.object({
       }
       return Math.round(n * 100) / 100;
     }),
+  requiresComponentBilling: zBool,
   active: zBool,
   openingQty: zInt("Opening stock").optional(),
 });
@@ -52,7 +53,7 @@ export async function saveProduct(_prev: ActionState, formData: FormData): Promi
         .limit(1);
       if (dup) return { error: `SKU ${d.sku} is already used by another product`, fieldErrors: { sku: ["Already used"] } };
     }
-    const values = { brandId: d.brandId, name: d.name, variant: d.variant ?? "", sku: d.sku ?? null, category: d.category ?? null, priceP: d.priceP, costP: d.costP, minStock: d.minStock ?? 0, hsnCode: d.hsnCode ?? null, gstRate: d.gstRate };
+    const values = { brandId: d.brandId, name: d.name, variant: d.variant ?? "", sku: d.sku ?? null, category: d.category ?? null, priceP: d.priceP, costP: d.costP, minStock: d.minStock ?? 0, hsnCode: d.hsnCode ?? null, hsnLocked: !!d.hsnCode, gstRate: d.gstRate, requiresComponentBilling: d.requiresComponentBilling };
     let id = d.id;
     await db.transaction(async (tx) => {
       if (id) {

@@ -7,7 +7,8 @@ vi.mock("next/cache", () => ({ revalidatePath: vi.fn() }));
 vi.mock("@/lib/stock-push", () => ({ queueStockPush: vi.fn() }));
 import { db } from "@/db";
 import { users, contacts, products, entities, businessRecords, dispatches, dispatchItems, invoices, shopifyStores, bankAccounts, creditNotes } from "@/db/schema";
-import { createDispatch, updateDispatch, setDispatchStatus } from "@/actions/dispatch";
+import { createDispatch, updateDispatch, setDispatchStatus, verifyDispatch } from "@/actions/dispatch";
+import { startShipmentReturn, progressShipmentReturn } from "@/actions/shipment-returns";
 import { issueCreditNote } from "@/lib/credit-note-issue";
 import { voidInvoice } from "@/actions/invoices";
 import { voidRecord } from "@/actions/records";
@@ -55,10 +56,44 @@ const makeDispatch = async (entityId = book, amount="1999") => {
   const f = {brandId:"babygambling", entityId, customerName:"Test buyer",contactId:customerId,address:"Test buyer address",dispatchDate:date,amountP:amount,recordSale:"on",paymentMethod:"credit",productId:[productId],qty:[1],unitPrice:[amount]};
   const result = await createDispatch(null,form(f)); expect(result?.ok, JSON.stringify(result)).toBe(true); return {id:result!.id!, f};
 };
+const pack = async (id: string) => {
+  expect((await verifyDispatch(null,form({id,check:"quality",reference:"Test goods checked"})))?.ok).toBe(true);
+  expect((await verifyDispatch(null,form({id,check:"billing",reference:"Test billing reviewed"})))?.ok).toBe(true);
+  expect((await setDispatchStatus(null,form({id,status:"packed"})))?.ok).toBe(true);
+};
 const readInvoice = async (id: string) => (await db.select().from(invoices).where(eq(invoices.id,id)))[0];
 const makeWeb = async () => { const n=node(); await db.insert(products).values({brandId:"babygambling",name:"Test web item",shopifyVariantId:n.lineItems.nodes[0].variant!.id.split("/").pop(),stockQty:10,hsnCode:"5811",gstRate:5}); await upsertOrderFromShopify(n,auth); return n; };
 
 describe("invoice and accounting regression checks", () => {
+  it("blocks a Shopify tax mismatch without replacing its recorded amounts", async () => {
+    const n = await makeWeb();
+    const variantId = n.lineItems.nodes[0].variant!.id.split("/").pop()!;
+    await db.update(products).set({ gstRate: 18 }).where(eq(products.shopifyVariantId, variantId));
+    const before = await peekInvoiceNumber(db, book, "B2C", date);
+    await expect(issueInvoice({ source: "order", id: n.id.split("/").pop()!, userId: actor.id })).rejects.toThrow(/Shopify charged 5%.*18%/);
+    expect(await peekInvoiceNumber(db, book, "B2C", date)).toBe(before);
+  });
+  it("holds a complete feeding pillow from Shopify until component selling amounts are supplied", async () => {
+    const n = await makeWeb();
+    n.lineItems.nodes[0].title = "Feeding Pillow Choco Sky";
+    await upsertOrderFromShopify(n, auth);
+    await expect(previewInvoice({ source: "order", id: n.id.split("/").pop()! })).rejects.toThrow(/cover selling amount at 5%/);
+  });
+  it("holds a manual product marked for component billing", async () => {
+    const d = await makeDispatch();
+    await db.update(products).set({ requiresComponentBilling: true }).where(eq(products.id, productId));
+    try { await expect(previewInvoice({ source: "dispatch", id: d.id })).rejects.toThrow(/inner selling amount at 18%/); }
+    finally { await db.update(products).set({ requiresComponentBilling: false }).where(eq(products.id, productId)); }
+  });
+  it("returns an existing issued invoice after product tax configuration changes", async () => {
+    const n = await makeWeb();
+    const source = { source: "order" as const, id: n.id.split("/").pop()!, userId: actor.id };
+    const issued = await issueInvoice(source);
+    const before = await readInvoice(issued.id);
+    await db.update(products).set({ gstRate: 18, requiresComponentBilling: true }).where(eq(products.shopifyVariantId, n.lineItems.nodes[0].variant!.id.split("/").pop()!));
+    expect(await issueInvoice(source)).toEqual({ id: issued.id, number: issued.number, created: false });
+    expect(await readInvoice(issued.id)).toEqual(before);
+  });
   it("previews the sample arithmetic without consuming a number, then posts GST once", async () => {
     const d=await makeDispatch(); const next=await peekInvoiceNumber(db,book,"B2C",date); const before=await gstSummary(book,date,date);
     const draft=await previewInvoice({source:"dispatch",id:d.id});
@@ -108,7 +143,7 @@ describe("invoice and accounting regression checks", () => {
   });
   it("does not allow shipped invoices to be cancelled without a credit note", async () => {
     const d=await makeDispatch(); const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id});
-    expect((await setDispatchStatus(null,form({id:d.id,status:"shipped"})))?.ok).toBe(true);
+    await pack(d.id); expect((await setDispatchStatus(null,form({id:d.id,status:"shipped"})))?.ok).toBe(true);
     expect((await voidInvoice(null,form({id:inv.id,reason:"Return"})))?.error).toMatch(/credit note/);
   });
   it("retries a missing product without permanently losing stock movements", async () => {
@@ -156,6 +191,7 @@ describe("invoice and accounting regression checks", () => {
       else throw new Error("Unexpected external request in test");
       return new Response(JSON.stringify({data}),{status:200,headers:{"content-type":"application/json"}});
     });
+    await pack(d.id);
     try { const result=await setDispatchStatus(null,form({id:d.id,status:"shipped",fulfilShopify:"on"})); expect(result?.ok).toBe(true); expect(result?.message).not.toContain("was not updated"); } finally {vi.unstubAllGlobals();}
     expect(sent).toBe(1); expect((await db.select().from(products).where(eq(products.id,product.id)))[0].stockQty).toBe(9);
   });
@@ -202,11 +238,42 @@ describe("invoice and accounting regression checks", () => {
     await expect(issueInvoice({source:"dispatch",id:d.id,userId:actor.id})).rejects.toThrow(/IRN/);
     await db.update(entities).set({eInvoiceStatus:"unconfirmed"}).where(eq(entities.id,book));
   });
+  it("credits an inspected parcel without restoring its stock twice", async () => {
+    await db.transaction(async tx=>setNextInvoiceNumber(tx,book,"CN",date,(await peekInvoiceNumber(tx,book,"CN",date)) ?? 1));
+    const d=await makeDispatch(); const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id});
+    await pack(d.id); expect((await setDispatchStatus(null,form({id:d.id,status:"shipped"})))?.ok).toBe(true);
+    const beforeStock=(await db.select().from(products).where(eq(products.id,productId)))[0].stockQty;
+    expect((await startShipmentReturn(null,form({id:d.id,reason:"Customer return"})))?.ok).toBe(true);
+    const input={invoiceId:inv.id,requestId:randomUUID(),reason:"Physical return",selections:[{originalLine:0,qty:1,restockQty:0}],userId:actor.id,taxAdjustmentConfirmed:true,expectedCount:0};
+    await expect(issueCreditNote(input)).rejects.toThrow(/physical return inspection/);
+    expect((await progressShipmentReturn(null,form({id:d.id,revision:0,stage:"received",note:"One received",[`received:${productId}`]:1})))?.ok).toBe(true);
+    expect((await progressShipmentReturn(null,form({id:d.id,revision:1,stage:"inspected",note:"Fit for sale",[`saleable:${productId}`]:1,[`damaged:${productId}`]:0})))?.ok).toBe(true);
+    expect((await db.select().from(products).where(eq(products.id,productId)))[0].stockQty).toBe(beforeStock+1);
+    await expect(issueCreditNote({...input,selections:[{originalLine:0,qty:1,restockQty:1}]})).rejects.toThrow(/already handled stock/);
+    const credit=await issueCreditNote(input); expect((await issueCreditNote(input)).id).toBe(credit.id);
+    expect((await db.select().from(products).where(eq(products.id,productId)))[0].stockQty).toBe(beforeStock+1);
+  });
+  it("does not restock local shipments on Shopify cancellation before or after physical inspection", async () => {
+    const n=node(); n.displayFulfillmentStatus="UNFULFILLED"; n.lineItems.nodes[0].unfulfilledQuantity=1;
+    const variantId=n.lineItems.nodes[0].variant!.id.split("/").pop()!;
+    const [p]=await db.insert(products).values({brandId:"babygambling",name:"RTO sync test",shopifyVariantId:variantId,stockQty:10}).returning();
+    await upsertOrderFromShopify(n,auth); const orderId=n.id.split("/").pop()!;
+    const [d]=await db.insert(dispatches).values({number:`RTO-${run}-${serial}`,brandId:"babygambling",entityId:book,customerName:"Test",dispatchDate:date,shopifyOrderId:orderId}).returning();
+    await db.insert(dispatchItems).values({dispatchId:d.id,productId:p.id,qty:1});
+    await pack(d.id); expect((await setDispatchStatus(null,form({id:d.id,status:"shipped"})))?.ok).toBe(true);
+    n.cancelledAt=date+"T08:00:00Z"; await upsertOrderFromShopify(n,auth);
+    expect((await db.select().from(products).where(eq(products.id,p.id)))[0].stockQty).toBe(9);
+    expect((await startShipmentReturn(null,form({id:d.id,reason:"COD refusal"})))?.ok).toBe(true);
+    expect((await progressShipmentReturn(null,form({id:d.id,revision:0,stage:"received",note:"Parcel arrived",[`received:${p.id}`]:1})))?.ok).toBe(true);
+    expect((await progressShipmentReturn(null,form({id:d.id,revision:1,stage:"inspected",note:"Saleable",[`saleable:${p.id}`]:1,[`damaged:${p.id}`]:0})))?.ok).toBe(true);
+    await upsertOrderFromShopify(n,auth); await upsertOrderFromShopify(n,auth);
+    expect((await db.select().from(products).where(eq(products.id,p.id)))[0].stockQty).toBe(10);
+  });
   it("posts partial credit once, restores only saleable units and retains the original invoice", async () => {
     await db.transaction(async tx=>setNextInvoiceNumber(tx,book,"CN",date,(await peekInvoiceNumber(tx,book,"CN",date)) ?? 1));
     const d=await makeDispatch(); await updateDispatch(null,form({...d.f,id:d.id,qty:[2],amountP:"3998"}));
     const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id});
-    expect((await setDispatchStatus(null,form({id:d.id,status:"shipped"})))?.ok).toBe(true);
+    await pack(d.id); expect((await setDispatchStatus(null,form({id:d.id,status:"shipped"})))?.ok).toBe(true);
     const beforeStock=(await db.select().from(products).where(eq(products.id,productId)))[0].stockQty;
     const before=(await outstandingByContact(book)).get(`${book}:${customerId}`)!;
     const input={invoiceId:inv.id,requestId:randomUUID(),reason:"One returned item, inspected",selections:[{originalLine:0,qty:1,restockQty:1}],userId:actor.id,taxAdjustmentConfirmed:true,expectedCount:0};
@@ -222,7 +289,7 @@ describe("invoice and accounting regression checks", () => {
     expect((await db.select().from(creditNotes).where(eq(creditNotes.invoiceId,inv.id))).reduce((n,c)=>n+c.totalP,0)).toBe(399800);
   });
   it("serializes competing returns and prevents receipts above the remaining invoice balance", async () => {
-    const d=await makeDispatch(); const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id}); await setDispatchStatus(null,form({id:d.id,status:"shipped"}));
+    const d=await makeDispatch(); const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id}); await pack(d.id); await setDispatchStatus(null,form({id:d.id,status:"shipped"}));
     const data={invoiceId:inv.id,reason:"Return",selections:[{originalLine:0,qty:1,restockQty:1}],userId:actor.id,taxAdjustmentConfirmed:true,expectedCount:0};
     const results=await Promise.allSettled([issueCreditNote({...data,requestId:randomUUID()}),issueCreditNote({...data,requestId:randomUUID()})]);
     expect(results.filter(r=>r.status==="fulfilled")).toHaveLength(1);
@@ -232,7 +299,7 @@ describe("invoice and accounting regression checks", () => {
     const [c]=await db.insert(contacts).values({name:"Paid return buyer",type:"customer",stateCode:"33",address:"Test buyer address"}).returning();
     const r=await createDispatch(null,form({brandId:"babygambling",entityId:book,contactId:c.id,customerName:"Paid return buyer",address:"Test buyer address",dispatchDate:date,amountP:"1999",recordSale:"on",paymentMethod:"cash",productId:[productId],qty:[1],unitPrice:["1999"]}));
     expect(r?.ok,JSON.stringify(r)).toBe(true); const d={id:r!.id!};
-    const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id}); await setDispatchStatus(null,form({id:d.id,status:"shipped"}));
+    const inv=await issueInvoice({source:"dispatch",id:d.id,userId:actor.id}); await pack(d.id); await setDispatchStatus(null,form({id:d.id,status:"shipped"}));
     const note=await issueCreditNote({invoiceId:inv.id,requestId:randomUUID(),reason:"Paid return",selections:[{originalLine:0,qty:1,restockQty:1}],userId:actor.id,taxAdjustmentConfirmed:true,expectedCount:0});
     expect((await outstandingByContact(book)).get(`${book}:${c.id}`)!.payable).toBe(199900);
     const [cn]=await db.select().from(creditNotes).where(eq(creditNotes.id,note.id));

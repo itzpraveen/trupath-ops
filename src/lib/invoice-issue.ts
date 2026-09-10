@@ -8,6 +8,7 @@ import { todayIST } from "@/lib/dates";
 import { stateCodeFor, stateName } from "@/lib/india";
 import { computeInvoice, type InvoiceLineInput } from "@/lib/invoice";
 import { nextInvoiceNumber, nextNumber } from "@/lib/numbering";
+import { assertProductBillingReady, assertShopifyTaxMatches } from "@/lib/product-tax";
 
 export type IssueResult = { id: string; number: string; created: boolean };
 
@@ -68,13 +69,16 @@ async function prepareInvoice(tx: Tx, input: InvoiceSource) {
         destination: order.shippingAddress?.city ?? a.city ?? null,
       };
       const variantIds = order.lineItems.map((l) => l.variantId).filter((v): v is string => !!v);
-      const prods = variantIds.length ? await tx.select({ id: products.id, shopifyVariantId: products.shopifyVariantId, hsnCode: products.hsnCode, gstRate: products.gstRate, unit: products.unit }).from(products).where(inArray(products.shopifyVariantId, variantIds)) : [];
+      const prods = variantIds.length ? await tx.select({ id: products.id, name: products.name, variant: products.variant, requiresComponentBilling: products.requiresComponentBilling, shopifyVariantId: products.shopifyVariantId, hsnCode: products.hsnCode, gstRate: products.gstRate, unit: products.unit }).from(products).where(inArray(products.shopifyVariantId, variantIds)) : [];
       const byVariant = new Map(prods.map((p) => [p.shopifyVariantId!, p]));
       const missingRate: string[] = [];
       for (const l of order.lineItems) {
         const quantity = l.originalQuantity ?? l.quantity;
         if (quantity <= 0) continue;
         const p = l.variantId ? byVariant.get(l.variantId) : undefined;
+        assertProductBillingReady({ name: l.title, variant: l.variantTitle });
+        if (p) assertProductBillingReady(p);
+        assertShopifyTaxMatches(l.title, p?.gstRate, l.taxLines ?? []);
         const gross = l.priceP * quantity - l.discountP;
         let ratePct: number;
         let taxP: number | undefined;
@@ -116,11 +120,12 @@ async function prepareInvoice(tx: Tx, input: InvoiceSource) {
       if (!contact?.stateCode) throw new Error("Choose a saved customer with a state code on this dispatch (Customers & vendors) so the invoice shows the place of supply.");
       buyer = { name: dsp!.customerName || contact.name, address: dsp!.address ?? contact.address ?? "", phone: dsp!.phone ?? contact.phone, email: contact.email, gstin: contact.gstin, stateCode: contact.stateCode, destination: null };
       const items = await tx
-        .select({ productId: products.id, qty: dispatchItems.qty, unitPriceP: dispatchItems.unitPriceP, name: products.name, variant: products.variant, hsnCode: products.hsnCode, gstRate: products.gstRate, priceP: products.priceP, unit: products.unit })
+        .select({ productId: products.id, qty: dispatchItems.qty, unitPriceP: dispatchItems.unitPriceP, name: products.name, variant: products.variant, requiresComponentBilling: products.requiresComponentBilling, hsnCode: products.hsnCode, gstRate: products.gstRate, priceP: products.priceP, unit: products.unit })
         .from(dispatchItems)
         .innerJoin(products, eq(products.id, dispatchItems.productId))
         .where(eq(dispatchItems.dispatchId, dsp!.id));
       if (!items.length) throw new Error("This dispatch has no items");
+      for (const item of items) assertProductBillingReady(item);
       const missing = [...new Set(items.filter((i) => i.gstRate === null || i.gstRate === undefined).map((i) => i.name))];
       if (missing.length) throw new Error(`Set the GST rate (and HSN code) for ${missing.join(", ")} under Products first.`);
       if (items.some((i) => i.unitPriceP === null)) throw new Error("Edit this dispatch and confirm the selling price for each item before invoicing");
@@ -166,6 +171,13 @@ export function invoiceFingerprint(value: Awaited<ReturnType<typeof previewInvoi
 
 export async function issueInvoice(input: InvoiceSource & { userId: string; fingerprint?: string }): Promise<IssueResult> {
   return db.transaction(async (tx) => {
+    // Return the immutable issued document before consulting today's product tax setup.
+    const [linkedDispatch] = input.source === "dispatch" ? await tx.select({ shopifyOrderId: dispatches.shopifyOrderId }).from(dispatches).where(eq(dispatches.id, input.id)) : [];
+    const orderId = input.source === "order" ? input.id : linkedDispatch?.shopifyOrderId;
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${orderId ? `order:${orderId}` : `dispatch:${input.id}`}, 0))`);
+    const [issued] = await tx.select({ id: invoices.id, number: invoices.number }).from(invoices)
+      .where(and(isNull(invoices.voidedAt), orderId ? eq(invoices.shopifyOrderId, orderId) : eq(invoices.dispatchId, input.id)));
+    if (issued) return { ...issued, created: false };
     const draft = await prepareInvoice(tx, input);
     const v = draft.values;
     if (input.fingerprint && input.fingerprint !== invoiceFingerprint(v)) throw new Error("The sale changed after this preview. Reload and review the invoice again before issuing it.");

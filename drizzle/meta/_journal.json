@@ -85,6 +85,20 @@
       "when": 1788865185544,
       "tag": "0011_record_brands",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1788896302727,
+      "tag": "0012_production_qc_and_returns",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1789039906948,
+      "tag": "0013_product_catalogue_tax",
+      "breakpoints": true
     }
   ]
 }

@@ -1,3 +1,4 @@
+import { productionOrderOptions } from "@/lib/queries/production";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
@@ -36,6 +37,7 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
     db.select().from(businessRecords).where(eq(businessRecords.shopifyOrderId, id)),
     db.select({ id: invoices.id, number: invoices.number }).from(invoices).where(and(eq(invoices.shopifyOrderId, id), isNull(invoices.voidedAt))).limit(1),
   ]);
+  const progress = await productionOrderOptions(id);
   const byVariant = new Map(matched.map((m) => [m.shopifyVariantId!, m]));
   const orderedUnits = o.lineItems.reduce((s, l) => s + l.quantity, 0);
   const deductedUnits = withDeducted(o.lineItems, o.stockDeducted, o.stockRestored).reduce((s, l) => s + (l.deductedQty ?? 0), 0);
@@ -69,7 +71,7 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
         ) : editable && !o.cancelledAt ? (
           <Link href={`/print/invoice/preview?source=order&id=${o.id}`} className={buttonVariants({ variant: "outline", size: "sm" })}>Review invoice</Link>
         ) : null}
-        {editable && openForFulfilment ? <FulfilDialog orderId={o.id} orderName={o.name} canFulfil={canFulfil} /> : null}
+        {editable && openForFulfilment && dsp[0]?.status === "shipped" ? <FulfilDialog orderId={o.id} orderName={o.name} canFulfil={canFulfil} /> : null}
         {adminUrl ? (
           <a href={adminUrl} target="_blank" rel="noreferrer" className={buttonVariants({ variant: "outline", size: "sm" })}>
             <ExternalLink /> Open in Shopify
@@ -127,6 +129,9 @@ export default async function OrderPage(props: PageProps<"/orders/[id]">) {
                 </TableBody>
               </Table>
             </TableCard>
+          </Section>
+          <Section title="Manufacturing progress">
+            <ul className="divide-y rounded-xl border bg-card text-sm">{progress.map(p => <li key={p.lineId} className="p-3"><p>{p.label}</p><p className="text-muted-foreground">{p.remaining} remaining before using existing stock · {p.awaitingQc} awaiting QC · {p.accepted} QC accepted</p></li>)}{!progress.length ? <li className="p-3 text-muted-foreground">No active mapped production requirements.</li> : null}</ul>
           </Section>
           <Section title="Totals">
             <div className="rounded-xl border bg-card p-4 text-sm">

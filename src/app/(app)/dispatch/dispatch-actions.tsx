@@ -1,6 +1,7 @@
 "use client";
 
-import { setDispatchStatus } from "@/actions/dispatch";
+import { startShipmentReturn } from "@/actions/shipment-returns";
+import { setDispatchStatus, verifyDispatch } from "@/actions/dispatch";
 import type { Dispatch } from "@/db/schema";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -8,16 +9,23 @@ import { ConfirmAction } from "@/components/app/confirm-action";
 import { Field, FormRow } from "@/components/app/field";
 import { FormDialog } from "@/components/app/form-dialog";
 
-export function DispatchActions({ dispatch, canFulfil }: { dispatch: Dispatch; canFulfil?: boolean }) {
+export function DispatchActions({ dispatch, canFulfil, canBill }: { dispatch: Dispatch; canFulfil?: boolean; canBill: boolean }) {
   const s = dispatch.status;
   return (
     <div className="flex flex-wrap gap-2">
-      {s === "pending" ? (
+      {s === "pending" ? <div className="w-full space-y-2 rounded-lg border bg-card p-3 text-sm">
+        <p>QC: {dispatch.qualityCheckedAt ? "verified" : "awaiting check"} · Billing: {dispatch.billingCheckedAt ? `verified · ${dispatch.billingReference}` : "awaiting accounts"}</p>
+        <div className="flex flex-wrap gap-2">{(!dispatch.qualityCheckedAt ? ["quality"] : !dispatch.billingCheckedAt && canBill ? ["billing"] : []).map(check => <FormDialog key={check} trigger={<Button size="sm" variant="outline" />} triggerLabel={check === "quality" ? "Verify QC" : "Verify billing"} title={check === "quality" ? "Verify goods for packing" : "Verify billing"} description={check === "quality" ? "Confirm these pieces are QC-accepted finished goods, including any existing stock. Verify product, quantity and condition." : "Review the customer, quantities, agreed prices, payment terms and invoice. Enter the issued invoice reference, including an external invoice if accounts uses another system."} action={verifyDispatch} submitLabel={check === "quality" ? "Confirm QC" : "Confirm billing"}>
+          <input type="hidden" name="id" value={dispatch.id} /><input type="hidden" name="check" value={check} />
+          <Field label="Check note / billing reference" name="reference" required><Input id="reference" name="reference" required maxLength={500} /></Field>
+        </FormDialog>)}</div>
+      </div> : null}
+      {s === "pending" && dispatch.qualityCheckedAt && dispatch.billingCheckedAt ? (
         <ConfirmAction trigger={<Button variant="outline" size="sm" />} title="Mark as packed?" action={setDispatchStatus} hidden={{ id: dispatch.id, status: "packed" }} confirmLabel="Mark packed">
           Mark packed
         </ConfirmAction>
       ) : null}
-      {s === "pending" || s === "packed" ? (
+      {s === "packed" ? (
         <FormDialog trigger={<Button size="sm" />} triggerLabel="Mark shipped" title="Mark as shipped" description="Stock is deducted now. Add the courier details so the customer can track it." action={setDispatchStatus} submitLabel="Mark shipped">
           {(state) => {
             const fe = state?.fieldErrors ?? {};
@@ -41,13 +49,6 @@ export function DispatchActions({ dispatch, canFulfil }: { dispatch: Dispatch; c
                     <Input id="trackingUrl" name="trackingUrl" inputMode="url" defaultValue={dispatch.trackingUrl ?? ""} />
                   </Field>
                 </FormRow>
-                <label className="flex items-start gap-2 text-sm">
-                  <input type="checkbox" name="createInvoice" defaultChecked className="mt-0.5 size-4 accent-primary" />
-                  <span>
-                    Create the tax invoice now
-                    <span className="block text-xs text-muted-foreground">Numbered from the books&apos; invoice series. Print it from this page for the parcel or the customer.</span>
-                  </span>
-                </label>
                 {dispatch.shopifyOrderId ? (
                   <div className="space-y-2 rounded-lg bg-muted/60 p-3">
                     <label className="flex items-start gap-2 text-sm">
@@ -74,8 +75,8 @@ export function DispatchActions({ dispatch, canFulfil }: { dispatch: Dispatch; c
         </ConfirmAction>
       ) : null}
       {s === "shipped" || s === "delivered" ? (
-        <ConfirmAction trigger={<Button variant="outline" size="sm" />} title="Mark as returned?" description="The items go back into finished stock." action={setDispatchStatus} hidden={{ id: dispatch.id, status: "returned" }} confirmLabel="Mark returned" withReason>
-          Returned
+        <ConfirmAction trigger={<Button variant="outline" size="sm" />} title="Start return / RTO?" description="Record COD refusal or another return reason. Stock remains out until the parcel is received and inspected." action={startShipmentReturn} hidden={{ id: dispatch.id }} confirmLabel="Start return" withReason>
+          Start return / RTO
         </ConfirmAction>
       ) : null}
       {s === "packed" ? (
@@ -83,8 +84,8 @@ export function DispatchActions({ dispatch, canFulfil }: { dispatch: Dispatch; c
           Unpack
         </ConfirmAction>
       ) : null}
-      {s === "pending" || s === "packed" || s === "shipped" ? (
-        <ConfirmAction trigger={<Button variant="ghost" size="sm" className="text-destructive" />} title="Cancel this dispatch?" description={s === "shipped" ? "Stock that was deducted will be put back." : undefined} action={setDispatchStatus} hidden={{ id: dispatch.id, status: "cancelled" }} confirmLabel="Cancel dispatch" destructive withReason>
+      {s === "pending" || s === "packed" ? (
+        <ConfirmAction trigger={<Button variant="ghost" size="sm" className="text-destructive" />} title="Cancel this dispatch?" action={setDispatchStatus} hidden={{ id: dispatch.id, status: "cancelled" }} confirmLabel="Cancel dispatch" destructive withReason>
           Cancel
         </ConfirmAction>
       ) : null}

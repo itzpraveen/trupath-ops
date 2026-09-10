@@ -1,10 +1,11 @@
+import { ReturnPanel } from "../return-panel";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { and, desc, eq, isNull, or } from "drizzle-orm";
 import { Pencil, Printer } from "lucide-react";
 import { db } from "@/db";
-import { dispatchItems, dispatches, invoices, products, shopifyOrders, uploads } from "@/db/schema";
+import { dispatchItems, dispatches, invoices, products, shipmentReturns, shipmentReturnEvents, shopifyOrders, uploads } from "@/db/schema";
 import { FULFIL_SCOPE, getStoreByShop, hasScope } from "@/lib/shopify-oauth";
 import { requireUser } from "@/lib/auth";
 import { formatDate, formatDateTime, todayIST } from "@/lib/dates";
@@ -38,8 +39,10 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
       .where(and(isNull(invoices.voidedAt), d.shopifyOrderId ? or(eq(invoices.dispatchId, id), eq(invoices.shopifyOrderId, d.shopifyOrderId)) : eq(invoices.dispatchId, id)))
       .limit(1),
   ]);
+  const [returnRow] = await db.select().from(shipmentReturns).where(eq(shipmentReturns.dispatchId, id));
+  const returnEvents = returnRow ? await db.select().from(shipmentReturnEvents).where(eq(shipmentReturnEvents.returnId, returnRow.id)).orderBy(desc(shipmentReturnEvents.createdAt)) : [];
   const editable = canEdit(user.role, "dispatch");
-  const editing = editable && sp.edit === "1";
+  const editing = editable && ["pending", "packed"].includes(d.status) && sp.edit === "1";
   let canFulfil: boolean | undefined;
   if (d.shopifyOrderId) {
     const [o] = await db.select({ shop: shopifyOrders.shop }).from(shopifyOrders).where(eq(shopifyOrders.id, d.shopifyOrderId)).limit(1);
@@ -54,7 +57,7 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
     return (
       <>
         <PageHeader title={`Edit ${d.number}`} backHref={`/dispatch/${id}`} backLabel="Back to dispatch" />
-        <DispatchForm products={productOptions} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers} date={todayIST()} initial={{ ...d, items: items.map((r) => ({ productId: r.it.productId, qty: r.it.qty, unitPriceP: r.it.unitPriceP })) }} itemsLocked={d.stockDeducted || !!invoice} />
+        <DispatchForm products={productOptions} brands={brands} entities={entities.map((e) => ({ id: e.id, name: e.name }))} channels={channels.map((c) => c.name)} customers={customers} date={todayIST()} initial={{ ...d, items: items.map((r) => ({ productId: r.it.productId, qty: r.it.qty, unitPriceP: r.it.unitPriceP })) }} itemsLocked={d.stockDeducted || !!invoice || !!d.shopifyOrderId} />
       </>
     );
   }
@@ -81,7 +84,7 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
         ) : editable && d.status !== "cancelled" ? (
           <Link href={`/print/invoice/preview?source=dispatch&id=${d.id}`} className={buttonVariants({ variant: "outline", size: "sm" })}>Review invoice</Link>
         ) : null}
-        {editable && !invoice && d.status !== "cancelled" ? (
+        {editable && !invoice && ["pending", "packed"].includes(d.status) ? (
           <Link href={`/dispatch/${d.id}?edit=1`} className={buttonVariants({ variant: "outline", size: "sm" })}>
             <Pencil /> Edit
           </Link>
@@ -90,10 +93,15 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
 
       {editable ? (
         <div className="mb-6">
-          <DispatchActions dispatch={d} canFulfil={canFulfil} />
+          <DispatchActions dispatch={d} canFulfil={canFulfil} canBill={canEdit(user.role, "sales")} />
         </div>
       ) : null}
 
+      {returnRow ? <div className="mb-6 space-y-3"><Section title="Return / RTO"><ReturnPanel dispatchId={id} row={returnRow} editable={editable} />
+        {invoice && !d.shopifyOrderId && returnRow.stage === "inspected" && canEdit(user.role, "sales") ? <Link href={`/sales/invoices/${invoice.id}/return`} className="mt-2 inline-block text-sm text-primary underline">Review credit note (stock already handled)</Link> : null}
+        {d.shopifyOrderId ? <p className="mt-2 text-sm text-muted-foreground">Reconcile the Shopify refund and credit note with accounts. This return only handles physical goods.</p> : null}
+        <details className="mt-3 text-sm"><summary className="cursor-pointer">Return history</summary><ul className="mt-2 space-y-2">{returnEvents.map(e => <li key={e.id}>{formatDateTime(e.createdAt)} · {e.event.replaceAll("_", " ")} · {e.note}</li>)}</ul></details>
+      </Section></div> : null}
       <div className="grid gap-6 lg:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
         <div className="space-y-6">
           <Section title={`Items · ${pcs} pcs`}>
@@ -124,7 +132,7 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
                 </TableBody>
               </Table>
             </TableCard>
-            {!d.stockDeducted && items.some((r) => r.stockQty < r.it.qty) ? <p className="mt-2 text-xs text-warning">Some items have less stock than this dispatch needs. Record production or a stock count first, or the balance will go negative when shipped.</p> : null}
+            {!d.stockDeducted && items.some((r) => r.stockQty < r.it.qty) ? <p className="mt-2 text-xs text-warning">Some items have less stock than this dispatch needs. Complete production and QC, or reconcile the physical count. Shipping is blocked until enough accepted stock is available.</p> : null}
           </Section>
           <Section title="Photos">
             <PhotoUploader kind="dispatch_photo" refId={d.id} photos={photos.map((p) => ({ ...p, createdAt: p.createdAt.toISOString() }))} editable={editable} />
@@ -163,9 +171,11 @@ export default async function DispatchDetailPage(props: PageProps<"/dispatch/[id
           <Section title="Timeline">
             <ul className="space-y-1.5 rounded-xl border bg-card p-4 text-sm">
               <li className="flex justify-between"><span>Created</span><span className="text-muted-foreground">{formatDateTime(d.createdAt)}</span></li>
+              {d.qualityCheckedAt ? <li>QC verified · {formatDateTime(d.qualityCheckedAt)}</li> : null}
+              {d.billingCheckedAt ? <li>Billing verified · {formatDateTime(d.billingCheckedAt)} · {d.billingReference}</li> : null}
               {d.shippedAt ? <li className="flex justify-between"><span>Shipped</span><span className="text-muted-foreground">{formatDateTime(d.shippedAt)}</span></li> : null}
               {d.deliveredAt ? <li className="flex justify-between"><span>Delivered</span><span className="text-muted-foreground">{formatDateTime(d.deliveredAt)}</span></li> : null}
-              <li className="flex justify-between"><span>Stock</span><span className="text-muted-foreground">{d.stockDeducted ? "deducted" : "not yet deducted"}</span></li>
+              <li className="flex justify-between"><span>Stock</span><span className="text-muted-foreground">{returnRow?.stage === "inspected" ? "saleable returns restored" : d.stockDeducted ? "deducted" : "not yet deducted"}</span></li>
             </ul>
             {d.note ? <p className="mt-2 whitespace-pre-line text-sm text-muted-foreground">{d.note}</p> : null}
           </Section>

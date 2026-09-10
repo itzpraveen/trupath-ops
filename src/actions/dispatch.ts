@@ -12,12 +12,12 @@ import { todayIST } from "@/lib/dates";
 import { errorMessage, parseForm, zBool, zDate, zEnum, zOptional, zOptionalMoney, zOptionalUuid, zRequired, zUuid, type ActionState } from "@/lib/forms";
 import { formatINR, toPaise } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
-import { lineForVariant, withDeducted } from "@/lib/order-stock";
+import { withDeducted } from "@/lib/order-stock";
 import { adjustStock } from "@/lib/stock";
 import { queueStockPush } from "@/lib/stock-push";
 import { entityExists } from "@/lib/queries/common";
 import { fulfillShopifyOrder } from "@/lib/shopify-writeback";
-import { issueInvoice } from "@/lib/invoice-issue";
+import { checkDispatchGoods, lockDispatch } from "@/lib/dispatch-readiness";
 
 function revalidateDispatch(id?: string) {
   for (const p of ["/dispatch", "/stock", "/sales", "/orders", "/"]) revalidatePath(p);
@@ -147,6 +147,8 @@ export async function updateDispatch(_prev: ActionState, formData: FormData): Pr
       await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${ref?.shopifyOrderId ? `order:${ref.shopifyOrderId}` : `dispatch:${d.id}`}, 0))`);
       const [existing] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id)).for("update");
       if (!existing) throw new Error("Dispatch not found");
+      if (!["pending", "packed"].includes(existing.status)) throw new Error("Only an unshipped dispatch can be edited");
+      if (existing.shopifyOrderId && d.productId) throw new Error("Website dispatch items are managed from the order");
       const [issued] = await tx.select({ id: invoices.id }).from(invoices).where(and(isNull(invoices.voidedAt), existing.shopifyOrderId ? eq(invoices.shopifyOrderId, existing.shopifyOrderId) : eq(invoices.dispatchId, d.id)));
       const changesSale = existing.entityId !== d.entityId || existing.amountP !== d.amountP || existing.contactId !== (d.contactId ?? null) || existing.customerName !== d.customerName || existing.address !== (d.address ?? null) || existing.dispatchDate !== d.dispatchDate || existing.brandId !== d.brandId || existing.orderRef !== (d.orderRef ?? "");
       if (issued && (changesSale || d.productId)) throw new Error("This dispatch has an issued invoice. Its buyer, items and selling value are locked. Use the tracking controls to update courier details.");
@@ -173,6 +175,7 @@ export async function updateDispatch(_prev: ActionState, formData: FormData): Pr
         await tx.delete(dispatchItems).where(eq(dispatchItems.dispatchId, d.id));
         await tx.insert(dispatchItems).values(lines.map((l) => ({ dispatchId: d.id, ...l })));
       }
+      if (changesSale || d.productId) await tx.update(dispatches).set({ status: "pending", qualityCheckedAt: null, qualityCheckedBy: null, billingCheckedAt: null, billingCheckedBy: null, billingReference: null }).where(eq(dispatches.id, d.id));
       await audit(tx, { userId: user.id, action: "update", entityType: "dispatch", entityId: d.id, summary: `Edited ${existing.number}` });
     });
     revalidateDispatch(d.id);
@@ -192,14 +195,15 @@ const statusSchema = z.object({
   reason: zOptional(500),
   fulfilShopify: zBool,
   notifyCustomer: zBool,
-  createInvoice: zBool,
 });
 
 const ALLOWED: Record<DispatchStatus, DispatchStatus[]> = {
-  pending: ["packed", "shipped", "cancelled"],
+  pending: ["packed", "cancelled"],
   packed: ["shipped", "pending", "cancelled"],
-  shipped: ["delivered", "returned", "cancelled"],
-  delivered: ["returned"],
+  shipped: ["delivered"],
+  delivered: [],
+  returning: [],
+  received: [],
   returned: [],
   cancelled: ["pending"],
 };
@@ -216,12 +220,17 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
       const [dsp] = await tx.select().from(dispatches).where(eq(dispatches.id, d.id)).for("update");
       if (!dsp) throw new Error("Dispatch not found");
       if (!ALLOWED[dsp.status].includes(d.status)) throw new Error(`Cannot move from ${dsp.status} to ${d.status}`);
+      if (d.status === "packed" || d.status === "shipped") {
+        if (!dsp.qualityCheckedAt || !dsp.billingCheckedAt) throw new Error("Complete QC and billing verification before packing or shipping");
+        await checkDispatchGoods(tx, dsp);
+      }
+      if (d.status === "cancelled" && dsp.stockDeducted) throw new Error("Stock has already left. Record a physical return instead of cancelling.");
       if (["cancelled", "returned"].includes(d.status)) {
         const [issued] = await tx.select({ number: invoices.number }).from(invoices).where(and(isNull(invoices.voidedAt), dsp.shopifyOrderId ? eq(invoices.shopifyOrderId, dsp.shopifyOrderId) : eq(invoices.dispatchId, d.id)));
         if (issued) throw new Error(`Invoice ${issued.number} is still issued. Accounts must cancel an unshipped invoice or process a credit note before returning this sale.`);
       }
 
-      const items = await tx.select().from(dispatchItems).where(eq(dispatchItems.dispatchId, d.id));
+      const items = await tx.select({productId: dispatchItems.productId, qty: sql<number>`sum(${dispatchItems.qty})::int`}).from(dispatchItems).where(eq(dispatchItems.dispatchId, d.id)).groupBy(dispatchItems.productId).orderBy(dispatchItems.productId);
       const now = new Date();
       const set: Partial<typeof dispatches.$inferInsert> = { status: d.status };
       if (d.courier !== undefined) set.courier = d.courier;
@@ -245,17 +254,22 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
         if (!dsp.stockDeducted) {
           let any = false;
           for (const it of items) {
-            const line = order ? lineForVariant(orderLines, variantOf.get(it.productId)) : undefined;
-            const already = line && !order?.stockRestored ? (line.deductedQty ?? 0) : 0;
+            const matches = orderLines.filter(l => l.variantId === variantOf.get(it.productId));
+            const already = matches.reduce((n,l) => n + (l.deductedQty ?? 0), 0);
             const qty = Math.max(0, it.qty - already);
-            if (line) line.deductedQty = already + qty;
+            let toAssign = qty;
+            for (const line of matches) {
+              const assigned = Math.min(toAssign, Math.max(0, line.quantity - (line.deductedQty ?? 0)));
+              line.deductedQty = (line.deductedQty ?? 0) + assigned;
+              toAssign -= assigned;
+            }
             if (qty > 0) {
               await adjustStock(tx, { productId: it.productId, kind: "dispatch_out", qty: -qty, refType: "dispatch", refId: dsp.number, note: `Dispatched ${dsp.number} to ${dsp.customerName}`, userId: user.id });
               any = true;
             }
           }
           if (order) {
-            await tx.update(shopifyOrders).set({ lineItems: orderLines, stockDeducted: order.stockDeducted || any, stockRestored: false }).where(eq(shopifyOrders.id, order.id));
+            await tx.update(shopifyOrders).set({ lineItems: orderLines, stockDeducted: order.stockDeducted || any, stockRestored: false, localReturns: true }).where(eq(shopifyOrders.id, order.id));
             if (!any) notes.push("stock had already been deducted by the website order");
           }
           set.stockDeducted = true;
@@ -263,34 +277,8 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
         }
       }
       if (d.status === "delivered") set.deliveredAt = now;
+      if (d.status === "pending" || d.status === "cancelled") Object.assign(set, {qualityCheckedAt: null, qualityCheckedBy: null, billingCheckedAt: null, billingCheckedBy: null, billingReference: null});
 
-      if ((d.status === "returned" || d.status === "cancelled") && dsp.stockDeducted) {
-        const note = `${d.status === "returned" ? "Returned" : "Cancelled"} ${dsp.number}${d.reason ? `: ${d.reason}` : ""}`;
-        const putBack = async (productId: string, qty: number) => {
-          await adjustStock(tx, { productId, kind: "return_in", qty, refType: "dispatch", refId: dsp.number, note, userId: user.id });
-          touched = true;
-        };
-        if (order) {
-          if (order.stockRestored) {
-            notes.push("the website order had already put its stock back");
-          } else {
-            // everything the website order took out, whether this dispatch or the order sync deducted it
-            for (const l of orderLines) {
-              const q = l.deductedQty ?? 0;
-              if (!l.variantId || q <= 0) continue;
-              const [p] = await tx.select({ id: products.id }).from(products).where(eq(products.shopifyVariantId, l.variantId)).limit(1);
-              if (p) await putBack(p.id, q);
-              l.deductedQty = 0;
-            }
-          }
-          // anything on the dispatch that is not part of the website order
-          for (const it of items) if (!lineForVariant(orderLines, variantOf.get(it.productId))) await putBack(it.productId, it.qty);
-          await tx.update(shopifyOrders).set({ lineItems: orderLines, stockRestored: true }).where(eq(shopifyOrders.id, order.id));
-        } else {
-          for (const it of items) await putBack(it.productId, it.qty);
-        }
-        set.stockDeducted = false;
-      }
 
       if (d.reason) set.note = dsp.note ? `${dsp.note}\n${d.status}: ${d.reason}` : `${d.status}: ${d.reason}`;
       await tx.update(dispatches).set(set).where(eq(dispatches.id, d.id));
@@ -330,15 +318,6 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
         message += `. Shopify was not updated: ${errorMessage(err)}`;
       }
     }
-    if (d.status === "shipped" && d.createInvoice) {
-      try {
-        const inv = await issueInvoice({ source: "dispatch", id: d.id, userId: user.id });
-        message += `. Invoice ${inv.number}${inv.created ? " created" : " already exists"}`;
-        revalidatePath("/sales");
-      } catch (err) {
-        message += `. Invoice not created: ${errorMessage(err)}`;
-      }
-    }
     return { ok: true, message };
   } catch (err) {
     return { error: errorMessage(err) };
@@ -348,13 +327,14 @@ export async function setDispatchStatus(_prev: ActionState, formData: FormData):
 /** Build a dispatch from a synced website order and open it. */
 export async function createDispatchFromOrder(orderId: string) {
   const user = await requireEditor("dispatch");
-  const [order] = await db.select().from(shopifyOrders).where(eq(shopifyOrders.id, orderId)).limit(1);
-  if (!order) throw new Error("Order not found");
-  const [existing] = await db.select({ id: dispatches.id }).from(dispatches).where(eq(dispatches.shopifyOrderId, orderId)).limit(1);
-  if (existing) redirect(`/dispatch/${existing.id}`);
-  const addr = order.shippingAddress ?? {};
-  const address = [addr.address1, addr.address2, addr.city, addr.province, addr.zip, addr.country].filter(Boolean).join(", ");
   const id = await db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`order:${orderId}`}, 0))`);
+    const [order] = await tx.select().from(shopifyOrders).where(eq(shopifyOrders.id, orderId));
+    if (!order || order.cancelledAt || order.stockRestored || order.localReturns) throw new Error("Choose an active website order without a return");
+    const [existing] = await tx.select({id: dispatches.id}).from(dispatches).where(eq(dispatches.shopifyOrderId, orderId));
+    if (existing) return existing.id;
+    const addr = order.shippingAddress ?? {};
+    const address = [addr.address1, addr.address2, addr.city, addr.province, addr.zip, addr.country].filter(Boolean).join(", ");
     const today = todayIST();
     const number = await nextNumber(tx, "dispatch", today);
     const [row] = await tx
@@ -382,11 +362,38 @@ export async function createDispatchFromOrder(orderId: string) {
       if (p && line.quantity > 0) items.push({ productId: p.id, qty: line.quantity });
       else missing.push(`${line.quantity} × ${line.title}`);
     }
-    if (items.length) await tx.insert(dispatchItems).values(items.map((i) => ({ dispatchId: row.id, ...i })));
+    if (missing.length || !items.length) throw new Error("Map all order items to products before creating a dispatch");
+    const combined = new Map<string, number>();
+    for (const item of items) combined.set(item.productId, (combined.get(item.productId) ?? 0) + item.qty);
+    await tx.insert(dispatchItems).values([...combined].map(([productId, qty]) => ({dispatchId: row.id, productId, qty})));
     if (missing.length) await tx.update(dispatches).set({ note: `${order.note ? order.note + "\n" : ""}Not matched to products: ${missing.join("; ")}` }).where(eq(dispatches.id, row.id));
     await audit(tx, { userId: user.id, action: "create", entityType: "dispatch", entityId: row.id, summary: `${number} from website order ${order.name} (${formatINR(order.totalP)})` });
     return row.id;
   });
   revalidateDispatch(id);
   redirect(`/dispatch/${id}`);
+}
+
+/** Existing module permissions apply: dispatch verifies goods; accounts verifies billing. */
+export async function verifyDispatch(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const parsed = parseForm(z.object({ id: zUuid("dispatch"), check: zEnum(["quality", "billing"] as const, "check"), reference: zRequired("Check note / billing reference", 500) }), formData);
+    if (!parsed.ok) return {error: parsed.error, fieldErrors: parsed.fieldErrors};
+    const d = parsed.data;
+    const user = await requireEditor(d.check === "billing" ? "sales" : "dispatch");
+    await db.transaction(async tx => {
+      const dsp = await lockDispatch(tx, d.id);
+      if (dsp.status !== "pending") throw new Error("Checks can only be recorded before packing");
+      if (d.check === "billing" && !dsp.qualityCheckedAt) throw new Error("Complete QC verification before billing verification");
+      await checkDispatchGoods(tx, dsp);
+      if (d.check === "quality") {
+        await tx.update(dispatches).set({qualityCheckedAt: new Date(), qualityCheckedBy: user.id, billingCheckedAt: null, billingCheckedBy: null, billingReference: null}).where(eq(dispatches.id, d.id));
+      } else {
+        await tx.update(dispatches).set({billingCheckedAt: new Date(), billingCheckedBy: user.id, billingReference: d.reference}).where(eq(dispatches.id, d.id));
+      }
+      await audit(tx, {userId: user.id, action: `verify_${d.check}`, entityType: "dispatch", entityId: d.id, summary: `${dsp.number}: ${d.check} verified. ${d.reference}`});
+    });
+    revalidateDispatch(d.id);
+    return {ok: true, message: d.check === "quality" ? "QC verified" : "Billing verified"};
+  } catch (err) { return {error: errorMessage(err)}; }
 }

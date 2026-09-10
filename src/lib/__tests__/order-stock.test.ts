@@ -74,6 +74,16 @@ describe("planOrderStock", () => {
     expect(plan.moves).toEqual([]);
   });
 
+  it("keeps locally dispatched returns out until inspection, including repeated Shopify events", () => {
+    const input = {...base, lines:[line({fulfilledQty:2})], previous:[line({deductedQty:2})], stockDeducted:true, localReturns:true, cancelled:true};
+    const first = planOrderStock(input);
+    expect(first.moves).toEqual([]);
+    expect(first.stockRestored).toBe(false);
+    expect(first.lines[0].deductedQty).toBe(2);
+    expect(planOrderStock({...input, previous:first.lines, cancelled:false, fulfillmentStatus:"RESTOCKED"}).moves).toEqual([]);
+    expect(planOrderStock({...input, previous:first.lines, cancelled:false, fulfillmentStatus:"FULFILLED"}).moves).toEqual([]);
+  });
+
   it("skips lines that are not linked to a variant", () => {
     const plan = planOrderStock({ ...base, lines: [line({ variantId: null, fulfilledQty: 2 })], fulfillmentStatus: "FULFILLED" });
     expect(plan.moves).toEqual([]);

@@ -1,3 +1,4 @@
+import { QcDialog } from "../qc-dialog";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { and, asc, desc, eq, gte, isNull, lte, sql } from "drizzle-orm";
@@ -29,7 +30,8 @@ export default async function ProductionPage(props: PageProps<"/factory/producti
   const BRAND: Record<string, string> = Object.fromEntries(brands.map((b) => [b.id, b.name]));
   const brand = pick(sp.brand, ["all", ...brands.map((b) => b.id)], "all");
   const [from, to] = monthRange(month);
-  const where = and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to), brand === "all" ? undefined : eq(productionEntries.brandId, brand));
+  const qcOnly = sp.qc === "pending";
+  const where = and(qcOnly ? and(isNull(productionEntries.voidedAt), sql`${productionEntries.qty} > ${productionEntries.acceptedQty} + ${productionEntries.rejectedQty}`) : and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to)), brand === "all" ? undefined : eq(productionEntries.brandId, brand));
   const [rows, byProduct] = await Promise.all([
     db
       .select({ e: productionEntries, name: products.name, variant: products.variant, userName: users.name })
@@ -54,7 +56,7 @@ export default async function ProductionPage(props: PageProps<"/factory/producti
 
   return (
     <>
-      <PageHeader title="Production" description="Everything the factory finished, by month." backHref="/factory" backLabel="Daily register">
+      <PageHeader title={qcOnly ? "Awaiting QC" : "Production"} description={qcOnly ? "Uninspected quantities across all dates." : "Work completed and QC results, by month."} backHref="/factory" backLabel="Daily register">
         <Link href={`/api/export/production?month=${month}`} className={buttonVariants({ variant: "outline", size: "sm" })}>
           <Download /> Export CSV
         </Link>
@@ -71,7 +73,7 @@ export default async function ProductionPage(props: PageProps<"/factory/producti
       </div>
       <StatGrid className="mb-6">
         <Stat label="Units made" value={units} tone="primary" />
-        <Stat label="Working days with output" value={days} />
+        <Stat label="QC accepted" value={live.reduce((n,r) => n + r.e.acceptedQty, 0)} />
         <Stat label="Average per day" value={days ? Math.round(units / days) : 0} />
         <Stat label="Material cost" value={formatINR(materialCost)} hint="From recipes" />
       </StatGrid>
@@ -110,7 +112,7 @@ export default async function ProductionPage(props: PageProps<"/factory/producti
                   <TableHead>Date</TableHead>
                   <TableHead>No.</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Qty</TableHead><TableHead>QC</TableHead>
                   <TableHead className="hidden sm:table-cell">Made by</TableHead>
                   <TableHead className="hidden md:table-cell text-right">Material cost</TableHead>
                   {editable ? <TableHead className="w-16" /> : null}
@@ -131,12 +133,13 @@ export default async function ProductionPage(props: PageProps<"/factory/producti
                         <span className="block text-xs text-muted-foreground">{BRAND[e.brandId] ?? e.brandId}{e.voidedAt ? ` · voided: ${e.voidReason}` : ""}</span>
                       </TableCell>
                       <TableCell className="tabular text-right font-medium">{e.qty}</TableCell>
+                      <TableCell><span className="block text-xs">{e.acceptedQty} accepted · {e.rejectedQty} rejected</span><span className="block text-xs text-muted-foreground">{e.qcRequired ? `${e.qty - e.acceptedQty - e.rejectedQty} awaiting QC` : "Recorded before QC workflow"}</span>{!e.voidedAt && e.qcRequired && editable ? <QcDialog entry={e} /> : null}</TableCell>
                       <TableCell className="hidden sm:table-cell">{e.workerName ?? userName ?? "—"}</TableCell>
                       <TableCell className="tabular hidden text-right md:table-cell">{formatINR(e.materialCostP)}</TableCell>
                       {editable ? (
                         <TableCell className="text-right">
                           {!e.voidedAt ? (
-                            <ConfirmAction trigger={<Button variant="ghost" size="xs" className="text-muted-foreground" />} title={`Void ${e.number}?`} description="Finished stock and the materials used will be put back." action={voidProduction} hidden={{ id: e.id }} confirmLabel="Void entry" destructive withReason>
+                            <ConfirmAction trigger={<Button variant="ghost" size="xs" className="text-muted-foreground" />} title={`Void ${e.number}?`} description="QC-accepted stock will be removed and consumed materials restored. This requires enough finished stock." action={voidProduction} hidden={{ id: e.id }} confirmLabel="Void entry" destructive withReason>
                               Void
                             </ConfirmAction>
                           ) : null}

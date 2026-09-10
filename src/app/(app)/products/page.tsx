@@ -17,6 +17,7 @@ import { StatusBadge } from "@/components/app/status-badge";
 import { Table, TableBody, TableCard, TableCell, TableEmpty, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
 import { ProductDialog } from "../stock/stock-dialogs";
 import { SyncButton } from "../orders/sync-button";
+import { isCompleteFeedingPillow } from "@/lib/product-tax";
 
 export const metadata: Metadata = { title: "Products" };
 const PAGE = 100;
@@ -49,6 +50,7 @@ export default async function ProductsPage(props: PageProps<"/products">) {
   return (
     <>
       <PageHeader title="Products" description="The catalogue for both brands. Baby Gambling products come from Shopify; add Firstbon and other products by hand.">
+        <Link href={`/products/catalogue${brand !== "all" ? `?brand=${brand}` : ""}`} className={buttonVariants({ variant: "outline", size: "sm" })}>Supplied catalogue</Link>
         {editable ? <ProductDialog brands={brands} categories={categories} /> : null}
         {editable && shopifyOn ? <SyncButton label="Refresh from Shopify" /> : null}
       </PageHeader>
@@ -114,6 +116,8 @@ export default async function ProductsPage(props: PageProps<"/products">) {
                         </StatusBadge>
                       ) : null}
                     </span>
+                    <span className="mt-1 block text-xs text-muted-foreground">HSN {p.hsnCode || "missing"} · GST {p.gstRate === null ? "missing" : `${p.gstRate}%`}</span>
+                    {p.requiresComponentBilling || isCompleteFeedingPillow(p.name, p.variant) ? <span className="mt-1 block text-xs text-amber-700 dark:text-amber-400">Cover/inner billing amounts needed</span> : null}
                   </TableCell>
                   <TableCell className="hidden text-xs text-muted-foreground md:table-cell">{p.sku ?? "—"}</TableCell>
                   <TableCell className="hidden text-xs text-muted-foreground lg:table-cell">{p.category ?? "—"}</TableCell>

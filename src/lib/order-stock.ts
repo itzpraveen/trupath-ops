@@ -28,6 +28,7 @@ export function planOrderStock(input: {
   touchesStock: boolean;
   stockDeducted: boolean;
   stockRestored: boolean;
+  localReturns?: boolean;
 }): OrderStockPlan {
   const prev = new Map(withDeducted(input.previous ?? [], input.stockDeducted, input.stockRestored).map((l) => [l.id, l]));
   const lines: ShopifyLine[] = input.lines.map((l) => ({ ...l, deductedQty: prev.get(l.id)?.deductedQty ?? 0 }));
@@ -35,7 +36,7 @@ export function planOrderStock(input: {
   let { stockDeducted, stockRestored } = input;
   const restock = input.cancelled || input.fulfillmentStatus === "RESTOCKED";
   if (restock) {
-    if (stockDeducted && !stockRestored) {
+    if (!input.localReturns && stockDeducted && !stockRestored) {
       for (const l of lines) {
         const q = l.deductedQty ?? 0;
         if (l.variantId && q > 0) moves.push({ variantId: l.variantId, qty: q, title: l.title });

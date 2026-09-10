@@ -88,13 +88,25 @@ await step("record production for a Baby Gambling product", async () => {
   const dlg = page.getByRole("dialog");
   await dlg.waitFor();
   await dlg.getByPlaceholder(/Search product/).fill("Nest Bed Sleepy Bear");
-  await dlg.getByRole("option").first().click();
+  await dlg.getByRole("listbox").getByRole("option").first().click();
   await dlg.getByLabel("Quantity made").fill("3");
   await dlg.getByLabel("Made by").selectOption({ index: 1 });
+  await dlg.locator('input[name="consumeMaterials"]').uncheck();
+  await dlg.getByLabel("Note", {exact:true}).fill("E2E material use recorded separately");
   await shot("05-production-dialog");
   await dlg.getByRole("button", { name: "Record production" }).click();
   await waitToast("recorded");
   await page.getByRole("row").filter({ hasText: "PROD/" }).first().waitFor({ timeout: 15000 });
+});
+await step("QC acceptance releases production into finished stock", async () => {
+  const row = page.getByRole("row").filter({hasText:/Nest Bed.*Sleepy Bear/}).last();
+  await row.getByRole("button", {name:"Inspect QC"}).click();
+  const dlg=page.getByRole("dialog");
+  await dlg.getByLabel("Accepted quantity").fill("3");
+  await dlg.getByLabel("Inspection note").fill("All three checked and accepted");
+  await dlg.getByRole("button", {name:"Save inspection"}).click();
+  await waitToast("QC saved");
+  await row.getByText("3 accepted").waitFor();
 });
 await step("mark attendance with one tap", async () => {
   const btn = page.getByRole("button", { name: /^Present for/ }).first();
@@ -138,7 +150,7 @@ await step("raw material purchase posts an expense", async () => {
 await step("create a recipe", async () => {
   await page.goto(`${BASE}/factory/boms/new`);
   await page.getByPlaceholder(/Search product/).fill("Baby Blanket Sleepy Bear");
-  await page.getByRole("option").first().click();
+  await page.getByRole("listbox").getByRole("option").first().click();
   await pickOption(page.locator('select[name="materialId[]"]').first(), "MULL");
   await page.locator('input[name="qtyPerUnit[]"]').first().fill("1.5");
   await shot("09-recipe");
@@ -151,7 +163,7 @@ await step("production with recipe consumes material", async () => {
   await page.getByRole("button", { name: "Record production" }).click();
   const dlg = page.getByRole("dialog");
   await dlg.getByPlaceholder(/Search product/).fill("Baby Blanket Sleepy Bear");
-  await dlg.getByRole("option").first().click();
+  await dlg.getByRole("listbox").getByRole("option").first().click();
   await dlg.getByLabel("Quantity made").fill("2");
   await dlg.getByRole("button", { name: "Record production" }).click();
   await waitToast("Materials used");
@@ -179,7 +191,7 @@ await step("attach a bill photo to the expense", async () => {
 await step("create and ship a dispatch", async () => {
   await page.goto(`${BASE}/dispatch/new`);
   await page.getByPlaceholder(/Search product/).first().fill("Nest Bed Sleepy Bear");
-  await page.getByRole("option").first().click();
+  await page.getByRole("listbox").getByRole("option").first().click();
   await page.locator('input[name="qty[]"]').first().fill("1");
   await page.getByLabel("Customer name").fill("E2E Customer");
   await page.getByLabel("Phone").fill("9999999999");
@@ -188,6 +200,16 @@ await step("create and ship a dispatch", async () => {
   await shot("10-dispatch-new");
   await page.getByRole("button", { name: "Create dispatch" }).click();
   await page.waitForURL(/\/dispatch\/[0-9a-f-]{36}$/, { timeout: 20000 });
+  for (const [trigger,confirm] of [["Verify QC","Confirm QC"],["Verify billing","Confirm billing"]]) {
+    await page.getByRole("button", {name:trigger}).click();
+    const check=page.getByRole("dialog");
+    await check.getByLabel("Check note / billing reference").fill("E2E external invoice and goods verified");
+    await check.getByRole("button", {name:confirm}).click();
+    await check.waitFor({state:"hidden"});
+  }
+  await page.getByRole("button", {name:"Mark packed"}).click();
+  await page.getByRole("dialog").getByRole("button", {name:"Mark packed"}).click();
+  await page.getByRole("dialog").waitFor({state:"hidden"});
   await page.getByRole("button", { name: "Mark shipped" }).click();
   const dlg = page.getByRole("dialog");
   await dlg.getByLabel("Courier").fill("DTDC");
@@ -195,6 +217,37 @@ await step("create and ship a dispatch", async () => {
   await dlg.getByRole("button", { name: "Mark shipped" }).click();
   await waitToast("marked shipped");
   await shot("11-dispatch-detail");
+});
+await step("return parcel receipt and inspection work on a phone", async () => {
+  await page.setViewportSize({width:390,height:844});
+  await page.getByRole("button",{name:"Start return / RTO"}).click();
+  let dlg=page.getByRole("dialog");
+  await dlg.getByLabel("Reason").fill("Customer refused COD parcel");
+  await dlg.getByRole("button",{name:"Start return",exact:true}).click();
+  await dlg.waitFor({state:"hidden"});
+  await page.getByRole("button",{name:"Mark return in transit"}).click();
+  dlg=page.getByRole("dialog");
+  await dlg.getByLabel("Return note").fill("Courier returning parcel");
+  await dlg.getByRole("button",{name:"Save return update"}).click();
+  await dlg.waitFor({state:"hidden"});
+  await page.getByRole("button",{name:"Receive returned parcel"}).click();
+  dlg=page.getByRole("dialog");
+  await dlg.getByLabel(/^Received ·/).fill("1");
+  await dlg.getByLabel("Return note").fill("One unit physically received");
+  await dlg.getByRole("button",{name:"Save return update"}).click();
+  await dlg.waitFor({state:"hidden"});
+  await page.getByRole("button",{name:"Inspect returned goods"}).click();
+  dlg=page.getByRole("dialog");
+  await dlg.getByLabel(/^Saleable ·/).fill("1");
+  await dlg.getByLabel(/^Damaged ·/).fill("0");
+  await dlg.getByLabel("Return note").fill("Saleable after inspection");
+  await shot("11a-return-inspection-mobile");
+  await dlg.getByRole("button",{name:"Complete inspection"}).click();
+  await dlg.waitFor({state:"hidden"});
+  await page.getByText("Inspection complete",{exact:true}).waitFor();
+  if (await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth)) throw new Error("Return page overflows on mobile");
+  await shot("11b-return-complete-mobile");
+  await page.setViewportSize({width:1440,height:1000});
 });
 await step("job work order with materials", async () => {
   await page.goto(`${BASE}/contacts`);
@@ -349,7 +402,7 @@ if (process.env.E2E_INVOICES === "1") {
     await page.goto(`${BASE}/sales/new`);
     const product = process.env.E2E_INVOICE_PRODUCT ?? "Invoice browser test product";
     await page.getByPlaceholder("Search product or SKU…").fill(product);
-    await page.getByRole("option").filter({ hasText: product }).first().click();
+    await page.getByRole("listbox").getByRole("option").filter({ hasText: product }).first().click();
     if (await page.getByLabel("Unit price including GST").inputValue() !== "1999") throw new Error("Product price did not populate");
     if (await page.getByLabel("Order value (₹)").inputValue() !== "1999") throw new Error("The calculated sale total is missing");
     await page.getByLabel("Saved customer (for statements)").selectOption({ label: process.env.E2E_INVOICE_CUSTOMER ?? "Invoice browser test customer" });

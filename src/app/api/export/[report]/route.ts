@@ -91,7 +91,7 @@ export async function GET(request: Request, ctx: RouteContext<"/api/export/[repo
       .innerJoin(products, eq(products.id, productionEntries.productId))
       .where(and(gte(productionEntries.workDate, from), lte(productionEntries.workDate, to), isNull(productionEntries.voidedAt)))
       .orderBy(asc(productionEntries.workDate));
-    return csvResponse(`production-${periodLabel}.csv`, toCsv(rows.map(({ e, name, variant }) => ({ date: e.workDate, number: e.number, product: name, variant, brand: e.brandId, qty: e.qty, worker: e.workerName ?? "", material_cost: toRupees(e.materialCostP), note: e.note ?? "" }))));
+    return csvResponse(`production-${periodLabel}.csv`, toCsv(rows.map(({ e, name, variant }) => ({ date: e.workDate, number: e.number, product: name, variant, brand: e.brandId, qty: e.qty, qc_accepted: e.acceptedQty, qc_rejected: e.rejectedQty, awaiting_qc: e.qty - e.acceptedQty - e.rejectedQty, order: e.shopifyOrderId ?? "", worker: e.workerName ?? "", material_cost: toRupees(e.materialCostP), note: e.note ?? "" }))));
   }
   if (report === "attendance") {
     const rows = await db

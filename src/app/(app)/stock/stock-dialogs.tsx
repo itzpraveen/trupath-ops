@@ -10,6 +10,8 @@ import { NativeSelect } from "@/components/ui/native-select";
 import { Textarea } from "@/components/ui/textarea";
 import { Field, FormRow } from "@/components/app/field";
 import { FormDialog } from "@/components/app/form-dialog";
+import Link from "next/link";
+import { isCompleteFeedingPillow } from "@/lib/product-tax";
 
 const KIND_META = {
   purchase_in: { title: "Stock in", description: "Finished goods received from outside (bought in or made elsewhere).", submit: "Add to stock" },
@@ -114,13 +116,18 @@ export function ProductDialog({ product, brands, categories, trigger }: { produc
               </Field>
             </FormRow>
             <FormRow>
-              <Field label="HSN code" name="hsnCode" error={fe.hsnCode} hint="For tax invoices, e.g. 5811 for quilted textile products.">
+              <Field label="HSN code" name="hsnCode" error={fe.hsnCode} hint="Use the supplied product classification. Codes saved here are kept during Shopify syncs.">
                 <Input id="hsnCode" name="hsnCode" defaultValue={product?.hsnCode ?? ""} placeholder="5811" />
               </Field>
               <Field label="GST rate (%)" name="gstRate" error={fe.gstRate} hint="Prices include this tax.">
                 <Input id="gstRate" name="gstRate" inputMode="decimal" defaultValue={product?.gstRate ?? ""} placeholder="5" />
               </Field>
             </FormRow>
+            <label className="flex items-start gap-2 text-sm">
+              <input type="checkbox" name="requiresComponentBilling" defaultChecked={product?.requiresComponentBilling || isCompleteFeedingPillow(product?.name ?? "", product?.variant)} className="mt-0.5 size-4 accent-primary" />
+              Feeding pillow: bill cover at 5% and inner at 18%. Invoicing waits for component selling amounts and setup.
+            </label>
+            {product?.catalogueRef ? <Link href={`/products/catalogue?brand=${product.brandId}#catalogue-${product.catalogueRef}`} className="block text-sm underline">View supplied purchase and selling prices</Link> : null}
             {!product ? (
               <Field label="Opening stock" name="openingQty" error={fe.openingQty}>
                 <Input id="openingQty" name="openingQty" type="number" min={0} step={1} />

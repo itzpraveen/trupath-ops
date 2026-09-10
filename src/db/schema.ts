@@ -165,6 +165,10 @@ export const products = pgTable(
     /** For tax invoices: HSN code and GST rate in percent (prices include tax). */
     hsnCode: text(),
     gstRate: numeric({ precision: 5, scale: 2, mode: "number" }),
+    /** Supplied workbook row linked by an operator; prices remain references. */
+    catalogueRef: text(),
+    hsnLocked: boolean().notNull().default(false),
+    requiresComponentBilling: boolean().notNull().default(false),
     stockQty: integer().notNull().default(0),
     minStock: integer().notNull().default(0),
     shopifyQty: integer(),
@@ -175,6 +179,7 @@ export const products = pgTable(
   },
   (t) => [
     uniqueIndex("products_shopify_variant_idx").on(t.shopifyVariantId),
+    uniqueIndex("products_brand_catalogue_idx").on(t.brandId, t.catalogueRef),
     index("products_sku_idx").on(t.sku),
     index("products_brand_idx").on(t.brandId),
   ],
@@ -313,6 +318,12 @@ export const productionEntries = pgTable(
       .references(() => brands.id),
     qty: integer().notNull(),
     bomId: uuid().references(() => boms.id),
+    shopifyOrderId: text(),
+    shopifyLineId: text(),
+    qcRequired: boolean().notNull().default(true),
+    acceptedQty: integer().notNull().default(0),
+    rejectedQty: integer().notNull().default(0),
+    qcRevision: integer().notNull().default(0),
     employeeId: uuid().references(() => employees.id),
     workerName: text(),
     materialCostP: money(),
@@ -325,6 +336,16 @@ export const productionEntries = pgTable(
   },
   (t) => [index("production_date_idx").on(t.workDate)],
 );
+
+export const productionChecks = pgTable("production_checks", {
+  id: id(),
+  productionId: uuid().notNull().references(() => productionEntries.id),
+  acceptedQty: integer().notNull(),
+  rejectedQty: integer().notNull(),
+  note: text().notNull(),
+  userId: uuid().notNull().references(() => users.id),
+  createdAt: createdAt(),
+});
 
 export type AttendanceStatus = "present" | "absent" | "half_day" | "leave" | "holiday";
 export const attendance = pgTable(
@@ -555,6 +576,7 @@ export const shopifyOrders = pgTable(
     entityId: text(),
     stockDeducted: boolean().notNull().default(false),
     stockRestored: boolean().notNull().default(false),
+    localReturns: boolean().notNull().default(false),
     note: text(),
     syncedAt: timestamp({ withTimezone: true }).defaultNow().notNull(),
   },
@@ -605,7 +627,7 @@ export const syncRuns = pgTable("sync_runs", {
 /* Dispatch (offline / wholesale / Firstbon shipments)                  */
 /* ------------------------------------------------------------------ */
 
-export type DispatchStatus = "pending" | "packed" | "shipped" | "delivered" | "returned" | "cancelled";
+export type DispatchStatus = "pending" | "packed" | "shipped" | "delivered" | "returning" | "received" | "returned" | "cancelled";
 export const dispatches = pgTable(
   "dispatches",
   {
@@ -634,6 +656,11 @@ export const dispatches = pgTable(
     stockDeducted: boolean().notNull().default(false),
     shippedAt: timestamp({ withTimezone: true }),
     deliveredAt: timestamp({ withTimezone: true }),
+    qualityCheckedAt: timestamp({ withTimezone: true }),
+    qualityCheckedBy: uuid().references(() => users.id),
+    billingCheckedAt: timestamp({ withTimezone: true }),
+    billingCheckedBy: uuid().references(() => users.id),
+    billingReference: text(),
     userId: uuid().references(() => users.id),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -652,6 +679,30 @@ export const dispatchItems = pgTable("dispatch_items", {
   qty: integer().notNull(),
   /** Agreed selling price including GST, fixed when the sale is entered. */
   unitPriceP: bigint({ mode: "number" }),
+});
+
+export type ShipmentReturnStage = "requested" | "in_transit" | "received" | "inspected";
+export type ShipmentReturnLine = { productId: string; name: string; expectedQty: number; receivedQty: number; saleableQty: number; damagedQty: number };
+export const shipmentReturns = pgTable("shipment_returns", {
+  id: id(),
+  dispatchId: uuid().notNull().unique().references(() => dispatches.id),
+  reason: text().notNull(),
+  stage: text().$type<ShipmentReturnStage>().notNull().default("requested"),
+  lines: jsonb().$type<ShipmentReturnLine[]>().notNull(),
+  revision: integer().notNull().default(0),
+  userId: uuid().notNull().references(() => users.id),
+  createdAt: createdAt(),
+  updatedAt: updatedAt(),
+});
+
+export const shipmentReturnEvents = pgTable("shipment_return_events", {
+  id: id(),
+  returnId: uuid().notNull().references(() => shipmentReturns.id),
+  event: text().notNull(),
+  note: text().notNull(),
+  lines: jsonb().$type<ShipmentReturnLine[]>().notNull(),
+  userId: uuid().notNull().references(() => users.id),
+  createdAt: createdAt(),
 });
 
 /* ------------------------------------------------------------------ */

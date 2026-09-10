@@ -6,9 +6,9 @@ Built with Next.js 16 (App Router, server actions), TypeScript, Tailwind v4 + sh
 
 ## What it automates
 
-- **Shopify → books.** Orders from babygambling.in sync in (webhooks + a background sync every 15 min). Each order becomes a sale, each refund a return, cancellations void the sale (and any refund that was part of the cancellation), and finished stock is deducted as Shopify marks items fulfilled, so split shipments deduct in parts. Cancelled and restocked orders put back exactly what went out.
-- **Recipes → raw materials.** A production entry ("made 10 nest beds") adds finished stock and deducts fabric, foam, zips etc. per the product's recipe (bill of materials).
-- **Dispatch → stock → Shopify.** Marking a parcel shipped deducts stock, and for website orders marks the order fulfilled in Shopify with the tracking number so the customer is notified. Returns and cancellations put stock back. Website orders turn into a dispatch with one click.
+- **Shopify → books.** Orders from babygambling.in sync in (webhooks + a background sync every 15 min). Each order becomes a sale, each refund a return, cancellations void the sale (and any refund that was part of the cancellation), and finished stock is deducted as Shopify marks items fulfilled, so split shipments deduct in parts. For locally shipped parcels, cancellation and restock messages do not restore stock; physical receipt and inspection handle their return. Shopify-only orders retain the existing stock-sync behavior.
+- **Recipes → raw materials.** A production entry ("made 10 nest beds") consumes its material recipe and waits for QC. Only accepted units enter finished stock. Entries can link to a website order line; rejections reopen the quantity to make. An active recipe is required unless a note explains how material use is recorded separately.
+- **Dispatch → stock → Shopify.** Marking a parcel shipped deducts stock, and for website orders marks the order fulfilled in Shopify with the tracking number so the customer is notified. QC and accounts billing verification are required before packing; packing is required before shipping. Shipped parcels use a return/RTO flow: requested → in transit → received → inspected. Only inspected saleable pieces return to stock; missing and damaged pieces remain visible. Unshipped parcels may be cancelled. Website orders turn into a dispatch once every item is mapped.
 - **Stock → website.** With "keep website stock in sync" on for a store, every stock change here is pushed to Shopify as the on-hand quantity; Shopify subtracts units committed to open orders itself, so the website never shows more than can actually ship.
 - **Job work → materials, stock, bills.** Materials sent out leave the store, accepted pieces come into finished stock, and the job worker's bills land in the factory books as payables (one bill per batch of pieces received).
 - **Raw-material purchases → expenses.** Recording a purchase can post the expense at the same time.
@@ -21,7 +21,7 @@ Built with Next.js 16 (App Router, server actions), TypeScript, Tailwind v4 + sh
 | Home | Today, this month, 30-day chart, channel split, website orders, factory today, low stock, recent entries |
 | Sales & money | Sales & expenses ledger (brand / factory books) with bill photos attached to entries, Website orders, Payments (cash & bank, receivables, payables), Customers & vendors, Reports |
 | Stock & dispatch | Finished stock, Products (catalogue), Dispatch with photos and printable challan |
-| Factory | Daily register (production + tap-to-mark attendance), Production history, Raw materials, Material recipes, Attendance grid with wages, Staff, Job work with printable challan |
+| Factory | Daily register (production + tap-to-mark attendance), Production history and QC queue, order production progress, Raw materials, Material recipes, Attendance grid with wages, Staff, Job work with printable challan |
 | Admin | Company details, Logins, Shopify connection, Lists & brands |
 
 ## Run locally
@@ -49,6 +49,10 @@ First login: `owner@trupaths.in` / `change-me-now` (or whatever `SEED_OWNER_EMAI
 
 Useful scripts: `pnpm db:generate` (new migration after editing `src/db/schema.ts`), `pnpm db:migrate`, `pnpm db:seed` (idempotent), `pnpm db:studio`, `pnpm typecheck`, `pnpm lint`.
 
+## Production, dispatch and physical returns
+
+See [operations workflow and validation](docs/operations-workflow.md) for the QC, billing, packing and RTO steps, migration behavior and remaining integration boundaries. Migration 0012 preserves stock from older production entries; it does not replay their stock movements.
+
 ## Tax invoices
 
 For manual sales, use **Sales & expenses → New sale / tax invoice**. Select a saved customer, enter the agreed unit prices including GST (net of discounts), save the sale, review the draft, and issue it. For Shopify sales, refresh the order and select **Review invoice** on its order or dispatch page. **Tax invoices** lists both issued and cancelled documents.
@@ -61,11 +65,11 @@ Before issuing real invoices:
 - Record the accountant's e-invoice applicability review. B2B issuance is blocked while applicability is unconfirmed or required, because the IRP connection is not implemented. A documented exemption/non-applicability review applies to every set of books sharing the GSTIN.
 - Reconcile opening stock before dispatching. Saving or invoicing a manual sale does not deduct stock; shipping does.
 
-Issued invoices retain seller, buyer, item prices and tax snapshots. Ordinary edits cannot change them, and numbers cannot move backwards. Unshipped invoices may be cancelled with a reason by accounts; their number remains in the register. For an invoiced manual dispatch that has shipped, open the invoice and choose **Record return / credit note**. Accounts enters the quantities received and quantities fit for restocking, confirms GST adjustment eligibility, reviews and issues the credit note. Configure the next unused CN number first. Partial returns preserve the original invoice and reduce the customer's balance; only the selected saleable quantities return to stock. The credit-note register links to both documents, and customer refunds can be entered under Payments.
+Issued invoices retain seller, buyer, item prices and tax snapshots. Ordinary edits cannot change them, and numbers cannot move backwards. Unshipped invoices may be cancelled with a reason by accounts; their number remains in the register. For an invoiced manual dispatch that has shipped, open the invoice and choose **Record return / credit note**. Accounts enters the quantities received and quantities fit for restocking, confirms GST adjustment eligibility, reviews and issues the credit note. Configure the next unused CN number first. If the parcel already used the dispatch receipt/inspection flow, credit quantities are limited to the physical receipt and restock quantities stay zero because inspection already handled stock. Partial returns preserve the original invoice and reduce the customer's balance; only the selected saleable quantities return to stock. The credit-note register links to both documents, and customer refunds can be entered under Payments.
 
 Shopify refunds and credit notes still require reconciliation in the existing accounting system; the local credit-note action blocks website orders to avoid duplicate refund or stock postings. Shopify orders with refunds, unsupported currency or unreconciled source totals cannot receive a newly generated invoice. The invoice register flags orders later cancelled or refunded.
 
-GST filing, e-invoice IRNs / signed QR codes and e-way bills are not implemented. Opening stock and accounting balances must be reconciled before relying on this application as the accounting system. Migration 0007 backfills pre-existing invoices from the seller details available at migration time; it cannot reconstruct historical details that were never saved. See [invoicing readiness](docs/invoicing-readiness.md) for the current limits and setup still needed.
+GST filing, e-invoice IRNs / signed QR codes and e-way bills are not implemented. Opening stock and accounting balances must be reconciled before relying on this application as the accounting system. Migration 0007 backfills pre-existing invoices from the seller details available at migration time; it cannot reconstruct historical details that were never saved. See [invoicing readiness](docs/invoicing-readiness.md) for the current limits and setup still needed, and the [business requirements register](docs/business-requirements.md) for the owner's outstanding decisions and the QC, RTO, staff access and payroll development requirements.
 
 ## Dashboard brands and access
 
@@ -76,6 +80,8 @@ Selecting a brand filters sales, expenses, returns, channels, website orders, di
 Owner and Accounts dashboards show financial summaries. Factory shows production, attendance and stock; Inventory & dispatch shows stock and dispatch without dashboard revenue totals. Brand selection is a reporting filter, not a per-user brand access restriction. Job roles on staff records are separate from login roles; login access is configured under Settings → Logins.
 
 ## Deploy on Render
+
+The 10 September product update adds **Products → Supplied catalogue**. Choose a brand, review the supplied workbook matches, and apply HSN/GST details to existing products. Purchase/sale amounts remain references unless explicitly selected as costs or GST-inclusive manual prices; Shopify prices and stock are preserved. Complete feeding pillows wait for the cover/inner selling amounts, and Shopify tax discrepancies require review before invoicing. See [the product requirements and remaining decisions](docs/business-requirements.md#product-and-gst-information-supplied--10-september-2026). Apply migration 0013 with the release; this source update does not import data into production automatically.
 
 1. Push this repository to GitHub (private is fine).
 2. In Render: **New → Blueprint**, pick the repo. `render.yaml` creates a Starter web service and a Basic-256MB Postgres, both in Singapore. Approximate cost: about $13/month. (Free instances sleep after 15 minutes and free databases are deleted after 30 days, so they are not suitable for a business tool.)
@@ -106,6 +112,7 @@ The in-process scheduler (`SHOPIFY_SYNC_MINUTES`) is enough on Render. If you ho
 | --- | --- |
 | `DATABASE_URL` | Postgres connection string (required) |
 | `APP_URL` | Public address of the app, used for Shopify redirects and webhooks (required) |
+| `PRODUCT_CATALOGUE_PRICES_JSON` | Private workbook price references keyed by catalogue row, with nullable `purchasePriceP` and `salePriceP` in paise. Set only in private server configuration; missing references stay blank. Real amounts must never be committed to this public repository. |
 | `APP_ENCRYPTION_KEY` | Encrypts Shopify tokens and client secrets stored in the database. Falls back to `SHOPIFY_CLIENT_SECRET`; set a dedicated key so rotating that secret does not lock the stored tokens |
 | `SEED_OWNER_EMAIL`, `SEED_OWNER_PASSWORD`, `SEED_OWNER_NAME` | First owner login, used only while no users exist |
 | `SHOPIFY_STORE_DOMAIN`, `SHOPIFY_CLIENT_ID`, `SHOPIFY_CLIENT_SECRET` | Optional server-level app credentials for one store; per-store credentials entered in Settings take precedence |

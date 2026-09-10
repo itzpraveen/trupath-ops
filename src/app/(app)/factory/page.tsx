@@ -1,3 +1,5 @@
+import { productionOrderOptions } from "@/lib/queries/production";
+import { QcDialog } from "./qc-dialog";
 import type { Metadata } from "next";
 import Link from "next/link";
 import { and, asc, eq, lte, inArray } from "drizzle-orm";
@@ -51,6 +53,7 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
       .orderBy(asc(jobWorkOrders.dueDate))
       .limit(5),
   ]);
+  const orderOptions = await productionOrderOptions();
   const live = entries.filter((r) => !r.e.voidedAt);
   const units = live.reduce((s, r) => s + r.e.qty, 0);
   const markMap = new Map(marks.map((m) => [m.employeeId, m]));
@@ -64,7 +67,7 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
   return (
     <>
       <PageHeader title="Daily register" description="Record what the factory made, who came in, and what is running low.">
-        {editable ? <ProductionDialog products={productOptions} employees={staff.map((s) => ({ id: s.id, name: s.name }))} date={date} bomProductIds={bomRows.map((b) => b.productId)} /> : null}
+        {editable ? <ProductionDialog products={productOptions} employees={staff.map((s) => ({ id: s.id, name: s.name }))} date={date} bomProductIds={bomRows.map((b) => b.productId)} orders={orderOptions} /> : null}
       </PageHeader>
 
       <div className="mb-5 flex items-center gap-2">
@@ -94,6 +97,10 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
       </StatGrid>
 
       <div className="space-y-8">
+        <Section title="Orders to make" actions={<Link href="/factory/production?qc=pending" className="text-sm text-primary underline">Open QC queue</Link>}>
+          <p className="mb-2 text-sm text-muted-foreground">Remaining order quantities before using existing stock. Choose an order in Record production to link its progress.</p>
+          <ul className="divide-y rounded-xl border bg-card text-sm">{orderOptions.filter(o => o.remaining || o.awaitingQc).map(o => <li key={`${o.orderId}:${o.lineId}`} className="flex flex-wrap justify-between gap-2 p-3"><span>{o.label}</span><span>{o.remaining} to make · {o.awaitingQc} awaiting QC · {o.accepted} accepted</span></li>)}{!orderOptions.some(o => o.remaining || o.awaitingQc) ? <li className="p-3 text-muted-foreground">No mapped website orders waiting for production or QC.</li> : null}</ul>
+        </Section>
         <Section title="Made on this day" actions={<Link href="/factory/production" className="text-sm text-primary hover:underline">Production history</Link>}>
           <TableCard>
             <Table>
@@ -101,7 +108,7 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
                 <TableRow>
                   <TableHead>No.</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead className="text-right">Qty</TableHead>
+                  <TableHead className="text-right">Qty</TableHead><TableHead>QC</TableHead>
                   <TableHead className="hidden sm:table-cell">Made by</TableHead>
                   <TableHead className="hidden md:table-cell">Note</TableHead>
                   {editable ? <TableHead className="w-16" /> : null}
@@ -125,12 +132,13 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
                         </span>
                       </TableCell>
                       <TableCell className="tabular text-right font-semibold">{e.qty}</TableCell>
+                      <TableCell><span className="block text-xs">{e.acceptedQty} accepted · {e.rejectedQty} rejected</span><span className="block text-xs text-muted-foreground">{e.qcRequired ? `${e.qty - e.acceptedQty - e.rejectedQty} awaiting QC` : "Recorded before QC workflow"}</span>{!e.voidedAt && e.qcRequired && editable ? <QcDialog entry={e} /> : null}</TableCell>
                       <TableCell className="hidden sm:table-cell">{e.workerName ?? userName ?? "—"}</TableCell>
                       <TableCell className="hidden max-w-56 truncate text-muted-foreground md:table-cell">{e.note ?? ""}</TableCell>
                       {editable ? (
                         <TableCell className="text-right">
                           {!e.voidedAt ? (
-                            <ConfirmAction trigger={<Button variant="ghost" size="xs" className="text-muted-foreground" />} title={`Void ${e.number}?`} description="Finished stock and the materials used will be put back." action={voidProduction} hidden={{ id: e.id }} confirmLabel="Void entry" destructive withReason>
+                            <ConfirmAction trigger={<Button variant="ghost" size="xs" className="text-muted-foreground" />} title={`Void ${e.number}?`} description="QC-accepted stock will be removed and consumed materials restored. This requires enough finished stock." action={voidProduction} hidden={{ id: e.id }} confirmLabel="Void entry" destructive withReason>
                               Void
                             </ConfirmAction>
                           ) : null}

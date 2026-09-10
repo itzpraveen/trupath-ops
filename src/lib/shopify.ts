@@ -4,7 +4,7 @@ import { ensureBaseline, listConnectedAuths, setStoreWebhooks, WEBHOOK_TOPICS, t
 import { planOrderStock } from "@/lib/order-stock";
 import { desc, eq, isNull, and, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { businessRecords, products, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
+import { businessRecords, dispatches, products, shopifyOrders, syncRuns, type ShopifyLine } from "@/db/schema";
 import { adjustStock } from "@/lib/stock";
 import { toPaise } from "@/lib/money";
 import { toYmd } from "@/lib/dates";
@@ -282,8 +282,8 @@ export async function upsertProductFromShopify(node: ProductNode, auth: StoreAut
           shopifyQty: values.shopifyQty,
           shopifyInventoryItemId: values.shopifyInventoryItemId,
           shopifyTracked: values.shopifyTracked,
-          // an HSN code typed in here survives syncs when Shopify has none
-          hsnCode: sql`coalesce(excluded.hsn_code, ${products.hsnCode})`,
+          // Owner-supplied classification survives Shopify refreshes, including a conflicting remote HS code.
+          hsnCode: sql`case when ${products.hsnLocked} then ${products.hsnCode} else coalesce(excluded.hsn_code, ${products.hsnCode}) end`,
           active: values.active,
         },
       });
@@ -370,8 +370,14 @@ export async function upsertOrderFromShopify(node: OrderNode, auth: StoreAuth) {
       touchesStock,
       stockDeducted: existing?.stockDeducted ?? false,
       stockRestored: existing?.stockRestored ?? false,
+      localReturns: existing?.localReturns ?? false,
     });
     const stored = { ...row, lineItems: plan.lines, stockDeducted: plan.stockDeducted, stockRestored: plan.stockRestored };
+    const goods = (items: ShopifyLine[]) => JSON.stringify(items.map(l => [l.id, l.variantId, l.quantity, l.priceP]));
+    if (existing && (goods(existing.lineItems) !== goods(lines) || existing.totalP !== row.totalP || existing.refundedP !== row.refundedP || JSON.stringify(existing.shippingAddress) !== JSON.stringify(row.shippingAddress) || existing.customerName !== row.customerName || !!existing.cancelledAt !== !!row.cancelledAt)) {
+      await tx.update(dispatches).set({status: "pending", qualityCheckedAt: null, qualityCheckedBy: null, billingCheckedAt: null, billingCheckedBy: null, billingReference: null}).where(and(eq(dispatches.shopifyOrderId, id), sql`${dispatches.status} in ('pending', 'packed')`));
+    }
+
     if (existing) {
       const { id: _id, ...rest } = stored;
       void _id;

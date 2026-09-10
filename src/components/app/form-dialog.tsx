@@ -58,7 +58,7 @@ export function FormDialog({
   return (
     <Dialog open={open} onOpenChange={setOpen}>
       {trigger ? <DialogTrigger render={trigger}>{triggerLabel}</DialogTrigger> : null}
-      <DialogContent className={wide ? "sm:max-w-2xl" : "sm:max-w-lg"}>
+      <DialogContent className={`max-h-[calc(100dvh-2rem)] overflow-y-auto ${wide ? "sm:max-w-2xl" : "sm:max-w-lg"}`}>
         <DialogHeader>
           <DialogTitle>{title}</DialogTitle>
           {description ? <DialogDescription>{description}</DialogDescription> : null}

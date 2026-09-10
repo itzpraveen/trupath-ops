@@ -17,6 +17,8 @@ export const DISPATCH_TONE: Record<string, keyof typeof TONES> = {
   packed: "info",
   shipped: "info",
   delivered: "success",
+  returning: "warning",
+  received: "warning",
   returned: "destructive",
   cancelled: "neutral",
 };

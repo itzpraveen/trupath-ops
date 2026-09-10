@@ -25,14 +25,14 @@ const PAGE = 50;
 export default async function DispatchPage(props: PageProps<"/dispatch">) {
   const user = await requireUser("dispatch");
   const sp = await props.searchParams;
-  const status = pick(sp.status, ["all", "open", "pending", "packed", "shipped", "delivered", "returned", "cancelled"], "open");
+  const status = pick(sp.status, ["all", "open", "pending", "packed", "shipped", "delivered", "returning", "received", "returned", "cancelled"], "open");
   const q = str(sp.q, 80);
   const page = int(sp.page);
   const brandRows = await getBrands();
   const brand = pick(sp.brand,["all",...brandRows.map(b=>b.id)],"all");
   const where = and(
     brand === "all" ? undefined : eq(dispatches.brandId,brand),
-    status === "all" ? undefined : status === "open" ? sql`${dispatches.status} in ('pending','packed','shipped')` : eq(dispatches.status, status),
+    status === "all" ? undefined : status === "open" ? sql`${dispatches.status} in ('pending','packed','shipped','returning','received')` : eq(dispatches.status, status),
     q ? or(ilike(dispatches.customerName, `%${q}%`), ilike(dispatches.number, `%${q}%`), ilike(dispatches.orderRef, `%${q}%`), ilike(dispatches.phone, `%${q}%`), ilike(dispatches.trackingNo, `%${q}%`)) : undefined,
   );
   const [rows, [{ total }], counts, brands] = await Promise.all([
@@ -77,6 +77,8 @@ export default async function DispatchPage(props: PageProps<"/dispatch">) {
             ["pending", "To pack"],
             ["shipped", "Shipped"],
             ["delivered", "Delivered"],
+            ["returning", "Return / RTO"],
+            ["received", "Awaiting inspection"],
             ["returned", "Returned"],
             ["cancelled", "Cancelled"],
             ["all", "All"],

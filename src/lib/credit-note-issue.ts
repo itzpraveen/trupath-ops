@@ -1,7 +1,7 @@
 import "server-only";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { db } from "@/db";
-import { businessRecords, creditNotes, dispatches, entities, invoices } from "@/db/schema";
+import { businessRecords, creditNotes, dispatches, entities, invoices, shipmentReturns } from "@/db/schema";
 import { computeCreditNote, type ReturnSelection } from "@/lib/credit-note";
 import { todayIST, fyRange } from "@/lib/dates";
 import { nextInvoiceNumber } from "@/lib/numbering";
@@ -37,6 +37,18 @@ export async function issueCreditNote(input: { invoiceId: string; requestId: str
     const previous = await tx.select().from(creditNotes).where(eq(creditNotes.invoiceId,inv.id));
     if (previous.length !== input.expectedCount) throw new Error("Another credit note was issued after this review. Reload the return and check the remaining quantities.");
     const totals = computeCreditNote(inv, previous, input.selections);
+    const [physicalReturn] = await tx.select().from(shipmentReturns).where(eq(shipmentReturns.dispatchId, dsp.id));
+    if (physicalReturn) {
+      if (physicalReturn.stage !== "inspected") throw new Error("Complete physical return inspection before issuing its credit note");
+      if (totals.lines.some(l => l.restockQty > 0)) throw new Error("This return inspection already handled stock. Enter zero restock quantities on the credit note.");
+      const credited = [...previous.flatMap(p => p.lines), ...totals.lines];
+      for (const line of inv.lines) {
+        if (!line.productId) continue;
+        const received = physicalReturn.lines.filter(l => l.productId === line.productId).reduce((n,l) => n + l.receivedQty, 0);
+        if (credited.filter(l => l.productId === line.productId).reduce((n,l) => n + l.qty, 0) > received) throw new Error("Credit quantities exceed the physically received return. Review missing goods with accounts.");
+      }
+    }
+
     const number = await nextInvoiceNumber(tx,inv.entityId,"CN",today);
     const [collision] = await tx.select({ id: invoices.id }).from(invoices).where(and(eq(invoices.sellerGstin,inv.sellerGstin),eq(invoices.number,number)));
     if (collision) throw new Error("This number is already an invoice number. Correct the CN series in Settings.");

@@ -1,10 +1,10 @@
 "use server";
 
-import { and, eq } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { attendance, bomLines, boms, employees, materialMovements, materials, productionEntries, products, type AttendanceStatus } from "@/db/schema";
+import { attendance, bomLines, boms, employees, materialMovements, materials, productionChecks, productionEntries, products, dispatches, shopifyOrders, type AttendanceStatus } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { errorMessage, parseForm, zBool, zDate, zEnum, zInt, zOptional, zOptionalMoney, zOptionalUuid, zPositiveInt, zRequired, zUuid, type ActionState } from "@/lib/forms";
@@ -28,6 +28,8 @@ const productionSchema = z.object({
   note: zOptional(1000),
   consumeMaterials: zBool,
   labourCostP: zOptionalMoney,
+  shopifyOrderId: zOptional(40),
+  shopifyLineId: zOptional(40),
 });
 
 export async function createProduction(_prev: ActionState, formData: FormData): Promise<ActionState> {
@@ -37,8 +39,16 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const d = parsed.data;
     const result = await db.transaction(async (tx) => {
+      if (d.shopifyOrderId) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`order:${d.shopifyOrderId}`}, 0))`);
       const [product] = await tx.select().from(products).where(eq(products.id, d.productId)).limit(1);
       if (!product) throw new Error("Product not found");
+      if (d.shopifyOrderId) {
+        const [order] = await tx.select().from(shopifyOrders).where(eq(shopifyOrders.id, d.shopifyOrderId));
+        const line = order?.lineItems.find(l => l.id === d.shopifyLineId && l.variantId === product.shopifyVariantId);
+        if (!order || order.cancelledAt || order.localReturns || order.stockRestored || !product.shopifyVariantId || !line || line.quantity <= 0 || order.brandId !== product.brandId) throw new Error("Choose an active order line matching this product and brand");
+        const [made] = await tx.select({ qty: sql<number>`coalesce(sum(${productionEntries.qty} - ${productionEntries.rejectedQty}),0)::int` }).from(productionEntries).where(and(eq(productionEntries.shopifyOrderId, order.id), eq(productionEntries.shopifyLineId, line.id), isNull(productionEntries.voidedAt)));
+        if (d.qty > line.quantity - Math.max(made.qty, line.fulfilledQty ?? 0)) throw new Error(`Only ${Math.max(0, line.quantity - Math.max(made.qty, line.fulfilledQty ?? 0))} units remain to make for this order line`);
+      } else if (d.shopifyLineId) throw new Error("Choose the order for this line");
       let workerName = d.workerName ?? null;
       if (d.employeeId) {
         const [emp] = await tx.select({ name: employees.name }).from(employees).where(eq(employees.id, d.employeeId)).limit(1);
@@ -50,6 +60,7 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
       const consumed: string[] = [];
       if (d.consumeMaterials) {
         const [bom] = await tx.select().from(boms).where(and(eq(boms.productId, d.productId), eq(boms.active, true))).limit(1);
+        if (!bom) throw new Error("Add an active material recipe, or record why material use is being entered separately in the note and untick recipe consumption");
         if (bom) {
           bomId = bom.id;
           const lines = await tx
@@ -57,7 +68,8 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
             .from(bomLines)
             .innerJoin(materials, eq(materials.id, bomLines.materialId))
             .where(eq(bomLines.bomId, bom.id));
-          for (const line of lines) {
+          if (!lines.length) throw new Error("The material recipe has no lines. Complete it before recording material consumption.");
+          for (const line of [...lines].sort((a,b) => a.materialId.localeCompare(b.materialId))) {
             const need = round3(line.qtyPerUnit * d.qty * (1 + line.wastagePct / 100));
             if (need <= 0) continue;
             await adjustMaterial(tx, { materialId: line.materialId, kind: "issue", qty: -need, unitCostP: line.costP, workDate: d.workDate, refType: "production", refId: number, note: `${number}: ${d.qty} × ${product.name}${product.variant ? ` ${product.variant}` : ""}`, userId: user.id });
@@ -65,7 +77,7 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
             consumed.push(`${need} ${line.unit} ${line.name}`);
           }
         }
-      }
+      } else if (!d.note) throw new Error("Add a note explaining how material use is recorded when recipe consumption is not selected");
       const [entry] = await tx
         .insert(productionEntries)
         .values({
@@ -74,6 +86,8 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
           productId: d.productId,
           brandId: product.brandId,
           qty: d.qty,
+          shopifyOrderId: d.shopifyOrderId ?? null,
+          shopifyLineId: d.shopifyLineId ?? null,
           bomId,
           employeeId: d.employeeId ?? null,
           workerName,
@@ -83,14 +97,13 @@ export async function createProduction(_prev: ActionState, formData: FormData): 
           userId: user.id,
         })
         .returning({ id: productionEntries.id });
-      await adjustStock(tx, { productId: d.productId, kind: "production_in", qty: d.qty, refType: "production", refId: number, note: `Produced ${number}${workerName ? ` by ${workerName}` : ""}`, userId: user.id });
       await audit(tx, { userId: user.id, action: "create", entityType: "production", entityId: entry.id, summary: `${number}: ${d.qty} × ${product.name} ${product.variant}`.trim(), meta: { consumed } });
       return { id: entry.id, number, consumed, product };
     });
-    queueStockPush([d.productId]);
     revalidateFactory();
+    if (d.shopifyOrderId) revalidatePath(`/orders/${d.shopifyOrderId}`);
     const msg = result.consumed.length ? `${result.number} recorded. Materials used: ${result.consumed.join(", ")}` : `${result.number} recorded`;
-    return { ok: true, message: msg, id: result.id };
+    return { ok: true, message: `${msg}. Waiting for QC; finished stock is added after acceptance.`, id: result.id };
   } catch (err) {
     return { error: errorMessage(err) };
   }
@@ -105,10 +118,16 @@ export async function voidProduction(_prev: ActionState, formData: FormData): Pr
     if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
     const { id, reason } = parsed.data;
     const productId = await db.transaction(async (tx) => {
+      const [ref] = await tx.select({ orderId: productionEntries.shopifyOrderId }).from(productionEntries).where(eq(productionEntries.id, id));
+      if (ref?.orderId) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`order:${ref.orderId}`}, 0))`);
       const [entry] = await tx.select().from(productionEntries).where(eq(productionEntries.id, id)).for("update");
       if (!entry) throw new Error("Entry not found");
       if (entry.voidedAt) throw new Error("Already voided");
-      await adjustStock(tx, { productId: entry.productId, kind: "adjustment", qty: -entry.qty, refType: "production_void", refId: entry.number, note: `Voided ${entry.number}: ${reason}`, userId: user.id, allowNegative: true });
+      if (entry.shopifyOrderId) {
+        const [sent] = await tx.select({id: dispatches.id}).from(dispatches).where(and(eq(dispatches.shopifyOrderId, entry.shopifyOrderId), sql`${dispatches.shippedAt} is not null`));
+        if (sent) throw new Error("This production belongs to a shipped order. Reconcile it through a return instead of voiding.");
+      }
+      if (entry.acceptedQty) await adjustStock(tx, { productId: entry.productId, kind: "adjustment", qty: -entry.acceptedQty, refType: "production_void", refId: entry.number, note: `Voided ${entry.number}: ${reason}`, userId: user.id });
       const used = await tx.select().from(materialMovements).where(and(eq(materialMovements.refType, "production"), eq(materialMovements.refId, entry.number)));
       for (const m of used) {
         await adjustMaterial(tx, { materialId: m.materialId, kind: "return", qty: -m.qty, refType: "production_void", refId: entry.number, note: `Returned from voided ${entry.number}`, userId: user.id });
@@ -123,6 +142,33 @@ export async function voidProduction(_prev: ActionState, formData: FormData): Pr
   } catch (err) {
     return { error: errorMessage(err) };
   }
+}
+
+export async function inspectProduction(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await requireEditor("factory");
+    const parsed = parseForm(z.object({ id: zUuid("production"), revision: zInt("Revision"), acceptedQty: zInt("Accepted quantity"), rejectedQty: zInt("Rejected quantity"), note: zRequired("Inspection note", 1000) }), formData);
+    if (!parsed.ok) return { error: parsed.error, fieldErrors: parsed.fieldErrors };
+    const d = parsed.data;
+    const result = await db.transaction(async tx => {
+      const [ref] = await tx.select({ orderId: productionEntries.shopifyOrderId }).from(productionEntries).where(eq(productionEntries.id, d.id));
+      if (ref?.orderId) await tx.execute(sql`select pg_advisory_xact_lock(hashtextextended(${`order:${ref.orderId}`}, 0))`);
+      const [entry] = await tx.select().from(productionEntries).where(eq(productionEntries.id, d.id)).for("update");
+      if (!entry || entry.voidedAt || !entry.qcRequired) throw new Error("This production entry is not awaiting QC");
+      if (entry.qcRevision !== d.revision) throw new Error("This batch was already updated. Refresh and review the remaining quantity.");
+      const remaining = entry.qty - entry.acceptedQty - entry.rejectedQty;
+      if (d.acceptedQty + d.rejectedQty < 1 || d.acceptedQty + d.rejectedQty > remaining) throw new Error(`Inspect between 1 and ${remaining} remaining units`);
+      if (d.acceptedQty) await adjustStock(tx, { productId: entry.productId, kind: "production_in", qty: d.acceptedQty, refType: "production_qc", refId: entry.id, note: `${entry.number}: QC accepted. ${d.note}`, userId: user.id });
+      await tx.insert(productionChecks).values({ productionId: entry.id, acceptedQty: d.acceptedQty, rejectedQty: d.rejectedQty, note: d.note, userId: user.id });
+      await tx.update(productionEntries).set({ acceptedQty: entry.acceptedQty + d.acceptedQty, rejectedQty: entry.rejectedQty + d.rejectedQty, qcRevision: entry.qcRevision + 1 }).where(eq(productionEntries.id, entry.id));
+      await audit(tx, { userId: user.id, action: "qc", entityType: "production", entityId: entry.id, summary: `${entry.number}: ${d.acceptedQty} accepted, ${d.rejectedQty} rejected`, meta: { note: d.note } });
+      return entry;
+    });
+    if (d.acceptedQty) queueStockPush([result.productId]);
+    revalidateFactory();
+    if (result.shopifyOrderId) revalidatePath(`/orders/${result.shopifyOrderId}`);
+    return { ok: true, message: `QC saved. ${d.acceptedQty} units added to finished stock.` };
+  } catch (err) { return { error: errorMessage(err) }; }
 }
 
 /* ---------------- Attendance ---------------- */
