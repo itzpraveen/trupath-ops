@@ -23,7 +23,7 @@ export function BomForm({
 }: {
   products: ProductOption[];
   materials: Pick<Material, "id" | "code" | "name" | "unit" | "costP" | "qty">[];
-  initial?: { id: string; productId: string; version: string; labourCostP: number; note: string | null; lines: { materialId: string; qtyPerUnit: number; wastagePct: number }[] };
+  initial?: { id?: string; productId: string; version: string; labourCostP: number; note: string | null; lines: { materialId: string; qtyPerUnit: number; wastagePct: number }[] };
 }) {
   const [lines, setLines] = useState<Line[]>(() =>
     initial?.lines.length
@@ -43,12 +43,12 @@ export function BomForm({
   const update = (key: number, patch: Partial<Line>) => setLines((ls) => ls.map((l) => (l.key === key ? { ...l, ...patch } : l)));
 
   return (
-    <ActionForm action={saveBom} submitLabel={initial ? "Save recipe" : "Create recipe"} redirectTo="/factory/boms">
+    <ActionForm action={saveBom} submitLabel={initial?.id ? "Save recipe" : "Create recipe"} redirectTo="/factory/boms">
       {(state) => {
         const fe = state?.fieldErrors ?? {};
         return (
           <>
-            {initial ? <input type="hidden" name="id" value={initial.id} /> : null}
+            {initial?.id ? <input type="hidden" name="id" value={initial.id} /> : null}
             <Field label="Product" name="productId" error={fe.productId} required>
               <ProductPicker products={products} defaultValue={initial?.productId} required />
             </Field>

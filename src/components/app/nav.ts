@@ -2,6 +2,7 @@ import {
   Boxes,
   CalendarCheck,
   ChartColumn,
+  ClipboardList,
   Contact,
   Factory,
   Hammer,
@@ -48,6 +49,7 @@ export const NAV: NavGroup[] = [
     title: "Factory",
     items: [
       { href: "/factory", label: "Daily register", icon: Factory, module: "factory", exact: true },
+      { href: "/factory/plan", label: "Production plan", icon: ClipboardList, module: "factory" },
       { href: "/factory/production", label: "Production", icon: Hammer, module: "factory" },
       { href: "/factory/materials", label: "Raw materials", icon: Layers, module: "materials" },
       { href: "/factory/boms", label: "Material recipes", icon: ListChecks, module: "materials" },

@@ -14,10 +14,12 @@ import { formatQty } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
 import { getEmployees, getProductOptions } from "@/lib/queries/common";
 import { lowMaterials } from "@/lib/queries/dashboard";
+import { activeRecipes, planRows, toPlanOptions } from "@/lib/queries/factory";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { ConfirmAction } from "@/components/app/confirm-action";
 import { PageHeader, Section } from "@/components/app/page-header";
 import { Stat, StatGrid } from "@/components/app/stat";
+import { StatusBadge } from "@/components/app/status-badge";
 import { Table, TableBody, TableCard, TableCell, TableEmpty, TableHead, TableHeader, TableRow } from "@/components/app/data-table";
 import { AttendanceBoard, type AttendanceRow } from "./attendance-board";
 import { ProductionDialog } from "./production-dialog";
@@ -53,7 +55,10 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
       .orderBy(asc(jobWorkOrders.dueDate))
       .limit(5),
   ]);
-  const orderOptions = await productionOrderOptions();
+  const [orderOptions, plans, recipes] = await Promise.all([productionOrderOptions(), planRows({ status: ["open"], today }), activeRecipes()]);
+  const planOpts = toPlanOptions(plans);
+  const dialogRecipes = Object.fromEntries([...recipes].map(([productId, r]) => [productId, { lines: r.lines }]));
+  const dueSoon = plans.filter((r) => r.remaining > 0 && r.plan.targetDate <= addDays(today, 2));
   const live = entries.filter((r) => !r.e.voidedAt);
   const units = live.reduce((s, r) => s + r.e.qty, 0);
   const markMap = new Map(marks.map((m) => [m.employeeId, m]));
@@ -67,7 +72,7 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
   return (
     <>
       <PageHeader title="Daily register" description="Record what the factory made, who came in, and what is running low.">
-        {editable ? <ProductionDialog products={productOptions} employees={staff.map((s) => ({ id: s.id, name: s.name }))} date={date} bomProductIds={bomRows.map((b) => b.productId)} orders={orderOptions} /> : null}
+        {editable ? <ProductionDialog products={productOptions} employees={staff.map((s) => ({ id: s.id, name: s.name }))} date={date} bomProductIds={bomRows.map((b) => b.productId)} orders={orderOptions} plans={planOpts} recipes={dialogRecipes} /> : null}
       </PageHeader>
 
       <div className="mb-5 flex items-center gap-2">
@@ -97,6 +102,26 @@ export default async function FactoryPage(props: PageProps<"/factory">) {
       </StatGrid>
 
       <div className="space-y-8">
+        <Section title="On the plan" description={dueSoon.length ? "Batches due in the next two days, oldest first." : undefined} actions={<Link href="/factory/plan" className="text-sm text-primary hover:underline">Production plan</Link>}>
+          <ul className="divide-y rounded-xl border bg-card text-sm">
+            {dueSoon.length ? (
+              dueSoon.slice(0, 8).map((r) => (
+                <li key={r.plan.id} className="flex flex-wrap items-center justify-between gap-2 p-3">
+                  <span className="min-w-0">
+                    <span className="font-medium">{r.name}{r.variant ? ` — ${r.variant}` : ""}</span>
+                    <span className="block text-xs text-muted-foreground">{r.plan.number} · due {formatDate(r.plan.targetDate, "d MMM")}{r.overdue ? " · overdue" : ""}</span>
+                  </span>
+                  <span className="flex items-center gap-3">
+                    <span className="tabular text-sm">{r.remaining} to make</span>
+                    {!r.recipe ? <StatusBadge tone="neutral">No recipe</StatusBadge> : r.shortCount ? <StatusBadge tone="warning">{r.shortCount} short</StatusBadge> : <StatusBadge tone="success">Enough</StatusBadge>}
+                  </span>
+                </li>
+              ))
+            ) : (
+              <li className="p-3 text-muted-foreground">Nothing planned for the next two days. {plans.length ? "Later batches are on the production plan." : "Plan a batch to check materials before the team starts."}</li>
+            )}
+          </ul>
+        </Section>
         <Section title="Orders to make" actions={<Link href="/factory/production?qc=pending" className="text-sm text-primary underline">Open QC queue</Link>}>
           <p className="mb-2 text-sm text-muted-foreground">Remaining order quantities before using existing stock. Choose an order in Record production to link its progress.</p>
           <ul className="divide-y rounded-xl border bg-card text-sm">{orderOptions.filter(o => o.remaining || o.awaitingQc).map(o => <li key={`${o.orderId}:${o.lineId}`} className="flex flex-wrap justify-between gap-2 p-3"><span>{o.label}</span><span>{o.remaining} to make · {o.awaitingQc} awaiting QC · {o.accepted} accepted</span></li>)}{!orderOptions.some(o => o.remaining || o.awaitingQc) ? <li className="p-3 text-muted-foreground">No mapped website orders waiting for production or QC.</li> : null}</ul>

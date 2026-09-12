@@ -158,6 +158,35 @@ await step("create a recipe", async () => {
   await page.waitForURL(`${BASE}/factory/boms`, { timeout: 20000 });
   await page.getByText("Baby Blanket Sleepy Bear").first().waitFor();
 });
+await step("plan a batch, check its materials and make part of it", async () => {
+  await page.goto(`${BASE}/factory/plan`);
+  await page.getByRole("button", { name: "Plan production" }).first().click();
+  const dlg = page.getByRole("dialog");
+  await dlg.waitFor();
+  await dlg.getByPlaceholder(/Search product/).fill("Baby Blanket Sleepy Bear");
+  await dlg.getByRole("listbox").getByRole("option").first().click();
+  await dlg.getByLabel("Pieces to make").fill("2");
+  await dlg.getByText("Enough in store").waitFor();
+  await shot("09b-production-plan");
+  await dlg.getByRole("button", { name: "Add to the plan" }).click();
+  await waitToast("added to the plan");
+  const planRow = page.getByRole("row").filter({ hasText: "Baby Blanket Sleepy Bear" }).first();
+  await planRow.waitFor({ timeout: 15000 });
+
+  await page.goto(`${BASE}/factory`);
+  await page.getByRole("button", { name: "Record production" }).click();
+  const rec = page.getByRole("dialog");
+  await rec.waitFor();
+  await pickOption(rec.locator("select#productionFor"), "Baby Blanket Sleepy Bear");
+  await rec.getByLabel("Quantity made").fill("1");
+  await rec.getByRole("button", { name: "Record production" }).click();
+  await waitToast("Waiting for QC");
+  await page.goto(`${BASE}/factory`);
+  const planned = page.locator("li").filter({ hasText: "Baby Blanket Sleepy Bear" }).first();
+  await planned.waitFor({ timeout: 15000 });
+  const plannedText = (await planned.textContent()) ?? "";
+  if (!plannedText.includes("1 to make")) throw new Error(`daily register did not show the remaining piece: ${plannedText}`);
+});
 await step("production with recipe consumes material", async () => {
   await page.goto(`${BASE}/factory`);
   await page.getByRole("button", { name: "Record production" }).click();

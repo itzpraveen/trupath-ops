@@ -1,0 +1,10 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "in.trupaths.ops",
+      "sha256_cert_fingerprints": ["1D:89:3B:8B:20:83:85:CA:33:E0:63:3A:F7:52:7B:94:9E:C9:67:83:52:10:6D:E1:0E:BE:09:FC:AE:53:1F:DC"]
+    }
+  }
+]

@@ -10,6 +10,7 @@ export const SERIES = {
   return: { prefix: "CN", digits: 5, label: "Returns / credit notes" },
   purchase: { prefix: "PUR", digits: 5, label: "Purchases" },
   production: { prefix: "PROD", digits: 5, label: "Production" },
+  plan: { prefix: "PLN", digits: 5, label: "Production plans" },
   jobwork: { prefix: "JW", digits: 5, label: "Job work orders" },
   dispatch: { prefix: "DSP", digits: 5, label: "Dispatch challans" },
   receipt: { prefix: "RCPT", digits: 5, label: "Payments received" },

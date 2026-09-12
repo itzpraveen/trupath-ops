@@ -1,10 +1,10 @@
 "use server";
 
-import { and, eq, ne } from "drizzle-orm";
+import { and, eq, ne, sql } from "drizzle-orm";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { db } from "@/db";
-import { bomLines, boms, businessRecords, materials, productionEntries, products } from "@/db/schema";
+import { bomLines, boms, businessRecords, materials, productionEntries, productionPlans, products } from "@/db/schema";
 import { audit } from "@/lib/audit";
 import { requireEditor } from "@/lib/auth";
 import { todayIST } from "@/lib/dates";
@@ -14,7 +14,7 @@ import { formatINR, formatQty } from "@/lib/money";
 import { nextNumber } from "@/lib/numbering";
 
 function revalidateMaterials() {
-  for (const p of ["/factory", "/factory/materials", "/factory/boms", "/sales", "/reports", "/"]) revalidatePath(p);
+  for (const p of ["/factory", "/factory/plan", "/factory/materials", "/factory/boms", "/sales", "/reports", "/"]) revalidatePath(p);
 }
 
 const materialSchema = z.object({
@@ -197,6 +197,33 @@ export async function saveBom(_prev: ActionState, formData: FormData): Promise<A
   }
 }
 
+/** Choose which recipe production uses, or stop using one without deleting it. */
+export async function setBomActive(_prev: ActionState, formData: FormData): Promise<ActionState> {
+  try {
+    const user = await requireEditor("materials");
+    const id = String(formData.get("id") ?? "");
+    const active = String(formData.get("active") ?? "") === "1";
+    if (!/^[0-9a-f-]{36}$/i.test(id)) return { error: "Recipe not found" };
+    const message = await db.transaction(async (tx) => {
+      const [bom] = await tx.select().from(boms).where(eq(boms.id, id)).for("update");
+      if (!bom) throw new Error("Recipe not found");
+      if (bom.active === active) return active ? "That recipe is already in use" : "That recipe is already out of use";
+      if (active) {
+        const [{ lines }] = await tx.select({ lines: sql<number>`count(*)::int` }).from(bomLines).where(eq(bomLines.bomId, id));
+        if (!lines) throw new Error("Add materials to this recipe before using it");
+        await tx.update(boms).set({ active: false }).where(and(eq(boms.productId, bom.productId), ne(boms.id, id)));
+      }
+      await tx.update(boms).set({ active }).where(eq(boms.id, id));
+      await audit(tx, { userId: user.id, action: "update", entityType: "bom", entityId: id, summary: `Recipe ${bom.version} ${active ? "in use" : "stopped"}` });
+      return active ? `Recipe ${bom.version} is now used for new production` : "Recipe stopped. New production needs another recipe, or a note explaining material use.";
+    });
+    revalidateMaterials();
+    return { ok: true, message };
+  } catch (err) {
+    return { error: errorMessage(err) };
+  }
+}
+
 export async function deleteBom(_prev: ActionState, formData: FormData): Promise<ActionState> {
   try {
     const user = await requireEditor("materials");
@@ -205,8 +232,9 @@ export async function deleteBom(_prev: ActionState, formData: FormData): Promise
     await db.transaction(async (tx) => {
       const [bom] = await tx.select({ id: boms.id }).from(boms).where(eq(boms.id, id)).limit(1);
       if (!bom) throw new Error("Recipe not found");
-      // production entries keep their recorded material usage; they just stop pointing at the recipe
+      // production entries and plans keep their recorded figures; they just stop pointing at the recipe
       await tx.update(productionEntries).set({ bomId: null }).where(eq(productionEntries.bomId, id));
+      await tx.update(productionPlans).set({ bomId: null }).where(eq(productionPlans.bomId, id));
       await tx.delete(boms).where(eq(boms.id, id));
       await audit(tx, { userId: user.id, action: "delete", entityType: "bom", entityId: id, summary: "Deleted recipe" });
     });

@@ -304,6 +304,39 @@ export const employees = pgTable("employees", {
   createdAt: createdAt(),
 });
 
+export const PRODUCTION_PLAN_STATUSES = ["open", "done", "cancelled"] as const;
+export type ProductionPlanStatus = (typeof PRODUCTION_PLAN_STATUSES)[number];
+
+/** What the factory intends to make next: quantity, target date and the recipe cost at the time of planning. */
+export const productionPlans = pgTable(
+  "production_plans",
+  {
+    id: id(),
+    number: text().notNull().unique(),
+    productId: uuid()
+      .notNull()
+      .references(() => products.id),
+    brandId: text()
+      .notNull()
+      .references(() => brands.id),
+    qty: integer().notNull(),
+    targetDate: date().notNull(),
+    status: text().$type<ProductionPlanStatus>().notNull().default("open"),
+    /** The recipe the estimate came from; production entries record what was actually consumed. */
+    bomId: uuid().references(() => boms.id),
+    materialCostP: money(),
+    labourCostP: money(),
+    shopifyOrderId: text(),
+    shopifyLineId: text(),
+    note: text(),
+    userId: uuid().references(() => users.id),
+    createdAt: createdAt(),
+    closedAt: timestamp({ withTimezone: true }),
+    closeReason: text(),
+  },
+  (t) => [index("production_plans_status_idx").on(t.status, t.targetDate)],
+);
+
 export const productionEntries = pgTable(
   "production_entries",
   {
@@ -318,6 +351,7 @@ export const productionEntries = pgTable(
       .references(() => brands.id),
     qty: integer().notNull(),
     bomId: uuid().references(() => boms.id),
+    planId: uuid().references(() => productionPlans.id),
     shopifyOrderId: text(),
     shopifyLineId: text(),
     qcRequired: boolean().notNull().default(true),
@@ -857,8 +891,14 @@ export const bomLinesRelations = relations(bomLines, ({ one }) => ({
   bom: one(boms, { fields: [bomLines.bomId], references: [boms.id] }),
   material: one(materials, { fields: [bomLines.materialId], references: [materials.id] }),
 }));
+export const productionPlansRelations = relations(productionPlans, ({ one, many }) => ({
+  product: one(products, { fields: [productionPlans.productId], references: [products.id] }),
+  brand: one(brands, { fields: [productionPlans.brandId], references: [brands.id] }),
+  entries: many(productionEntries),
+}));
 export const productionRelations = relations(productionEntries, ({ one }) => ({
   product: one(products, { fields: [productionEntries.productId], references: [products.id] }),
+  plan: one(productionPlans, { fields: [productionEntries.planId], references: [productionPlans.id] }),
   brand: one(brands, { fields: [productionEntries.brandId], references: [brands.id] }),
   employee: one(employees, { fields: [productionEntries.employeeId], references: [employees.id] }),
   user: one(users, { fields: [productionEntries.userId], references: [users.id] }),
@@ -915,5 +955,6 @@ export type ShopifyOrder = typeof shopifyOrders.$inferSelect;
 export type Dispatch = typeof dispatches.$inferSelect;
 export type JobWorkOrder = typeof jobWorkOrders.$inferSelect;
 export type ProductionEntry = typeof productionEntries.$inferSelect;
+export type ProductionPlan = typeof productionPlans.$inferSelect;
 export type Payment = typeof payments.$inferSelect;
 export type BankAccount = typeof bankAccounts.$inferSelect;

@@ -9,13 +9,14 @@ vi.mock("@/lib/auth", async () => {
 vi.mock("next/cache", () => ({revalidatePath: vi.fn()}));
 vi.mock("@/lib/stock-push", () => ({queueStockPush: vi.fn()}));
 import { db } from "@/db";
-import { boms, bomLines, materials, productionChecks, products, shopifyOrders, dispatches, shipmentReturns, shipmentReturnEvents, users } from "@/db/schema";
-import { createProduction, inspectProduction, voidProduction } from "@/actions/factory";
+import { boms, bomLines, materials, productionChecks, productionPlans, products, shopifyOrders, dispatches, shipmentReturns, shipmentReturnEvents, users } from "@/db/schema";
+import { cancelProductionPlan, closeProductionPlan, createProduction, createProductionPlan, inspectProduction, voidProduction } from "@/actions/factory";
 import { createDispatch, setDispatchStatus, updateDispatch, verifyDispatch } from "@/actions/dispatch";
 import { progressShipmentReturn, startShipmentReturn } from "@/actions/shipment-returns";
 import { fulfilOrderInShopify } from "@/actions/shopify";
 import { todayIST } from "@/lib/dates";
 import { productionOrderOptions } from "@/lib/queries/production";
+import { planRows } from "@/lib/queries/factory";
 const date = todayIST();
 const form = (data: Record<string, string | number | string[] | number[]>) => {const f = new FormData(); for (const [k,v] of Object.entries(data)) {if (Array.isArray(v)) v.forEach(x => f.append(`${k}[]`, String(x))); else f.set(k, String(v));} return f;};
 const ok = (result: {ok?: boolean; error?: string} | null) => expect(result?.ok, result?.error).toBe(true);
@@ -98,6 +99,57 @@ describe("production, dispatch gates and physical returns", () => {
     const p = await product(); await production(p.id,2); const d=await parcel(p.id,1);
     expect((await verifyDispatch(null,form({id:d.id,check:"quality",reference:"Check"})))?.error).toMatch(/insufficient/);
     expect((await fulfilOrderInShopify(null,form({id:"12345"})))?.error).toMatch(/QC, billing, packing/);
+  });
+
+  it("plans a batch against the recipe, caps production at the plan and closes it when QC accepts the quantity", async () => {
+    const p = await product();
+    const [m] = await db.insert(materials).values({code: randomUUID().slice(0,8), name: "Plan test fabric", unit: "m", qty: 30, costP: 5000}).returning();
+    const [bom] = await db.insert(boms).values({productId: p.id, labourCostP: 1000}).returning();
+    await db.insert(bomLines).values({bomId: bom.id, materialId: m.id, qtyPerUnit: 2, wastagePct: 10});
+    const created = await createProductionPlan(null, form({productId: p.id, qty: 10, targetDate: date, note: "Plan test batch"}));
+    ok(created);
+    const planId = created!.id!;
+    const [plan] = await db.select().from(productionPlans).where(eq(productionPlans.id, planId));
+    expect(plan.materialCostP).toBe(110000);
+    expect(plan.labourCostP).toBe(10000);
+
+    const row = () => planRows({status: ["open", "done"], today: date}).then(rows => rows.find(r => r.plan.id === planId)!);
+    const planned = await row();
+    expect(planned.remaining).toBe(10);
+    expect(planned.requirement[0]).toMatchObject({required: 22, inStock: 30, short: 0});
+    expect(planned.recipe?.canMake).toBe(13);
+
+    expect((await createProduction(null, form({productId: p.id, planId, qty: 11, workDate: date, consumeMaterials: "on"})))?.error).toMatch(/Only 10 pieces remain/);
+    const first = await production(p.id, 6, {planId, consumeMaterials: "on"});
+    expect((await row()).remaining).toBe(4);
+    ok(await inspectProduction(null, form({id: first, revision: 0, acceptedQty: 5, rejectedQty: 1, note: "One piece rejected"})));
+    expect((await db.select().from(productionPlans).where(eq(productionPlans.id, planId)))[0].status).toBe("open");
+    expect((await row()).remaining).toBe(5);
+
+    expect((await cancelProductionPlan(null, form({id: planId, reason: "Too late"})))?.error).toMatch(/already recorded/);
+    const second = await production(p.id, 5, {planId, consumeMaterials: "on"});
+    ok(await inspectProduction(null, form({id: second, revision: 0, acceptedQty: 5, rejectedQty: 0, note: "All accepted"})));
+    expect((await db.select().from(productionPlans).where(eq(productionPlans.id, planId)))[0].status).toBe("done");
+    expect((await createProduction(null, form({productId: p.id, planId, qty: 1, workDate: date, consumeMaterials: "on"})))?.error).toMatch(/closed/);
+
+    ok(await voidProduction(null, form({id: second, reason: "Recount"})));
+    expect((await db.select().from(productionPlans).where(eq(productionPlans.id, planId)))[0].status).toBe("open");
+  });
+
+  it("shows a shortage before the materials leave the store, and cancels a plan nothing was made against", async () => {
+    const p = await product();
+    const [m] = await db.insert(materials).values({code: randomUUID().slice(0,8), name: "Short test fabric", unit: "m", qty: 5, costP: 2000}).returning();
+    const [bom] = await db.insert(boms).values({productId: p.id}).returning();
+    await db.insert(bomLines).values({bomId: bom.id, materialId: m.id, qtyPerUnit: 1});
+    const created = await createProductionPlan(null, form({productId: p.id, qty: 20, targetDate: date}));
+    ok(created);
+    const planned = (await planRows({status: ["open"], today: date})).find(r => r.plan.id === created!.id)!;
+    expect(planned.shortCount).toBe(1);
+    expect(planned.requirement[0].short).toBe(15);
+    expect((await createProduction(null, form({productId: p.id, planId: created!.id!, qty: 20, workDate: date, consumeMaterials: "on"})))?.error).toMatch(/Not enough/);
+    ok(await cancelProductionPlan(null, form({id: created!.id!, reason: "Waiting for fabric"})));
+    expect((await db.select().from(productionPlans).where(eq(productionPlans.id, created!.id!)))[0].status).toBe("cancelled");
+    expect((await closeProductionPlan(null, form({id: created!.id!})))?.error).toMatch(/already closed/);
   });
 
   it("tracks refusal, transit and receipt with no stock effect, then restores only inspected saleable goods once", async () => {

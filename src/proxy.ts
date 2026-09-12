@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-const PUBLIC_PREFIXES = ["/login", "/api/health", "/api/webhooks", "/api/cron"];
+const PUBLIC_PREFIXES = ["/login", "/api/health", "/api/webhooks", "/api/cron", "/.well-known"];
 
 export function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;

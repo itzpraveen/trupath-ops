@@ -9,7 +9,9 @@ import { requireUser } from "@/lib/auth";
 import { formatDate, todayIST } from "@/lib/dates";
 import { formatINR, formatQty } from "@/lib/money";
 import { canEdit } from "@/lib/permissions";
+import { combineRequirements } from "@/lib/production-plan";
 import { getContacts } from "@/lib/queries/common";
+import { planRows } from "@/lib/queries/factory";
 import { str } from "@/lib/url";
 import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -38,6 +40,9 @@ export default async function MaterialsPage(props: PageProps<"/factory/materials
   const [{ maxCode }] = await db.select({ maxCode: sql<number>`coalesce(max(nullif(regexp_replace(${materials.code}, '[^0-9]', '', 'g'), '')::int), 0)` }).from(materials);
   const nextCode = `RM-${String(Number(maxCode) + 1).padStart(3, "0")}`;
   const today = todayIST();
+  const planned = combineRequirements((await planRows({ status: ["open"], today })).map((r) => r.requirement));
+  const needed = new Map(planned.map((r) => [r.materialId, r]));
+  const shortForPlan = planned.filter((r) => r.short > 0);
 
   return (
     <>
@@ -54,7 +59,7 @@ export default async function MaterialsPage(props: PageProps<"/factory/materials
         <Stat label="Materials" value={rows.filter((m) => m.active).length} />
         <Stat label="Running low" value={low.length} tone={low.length ? "warning" : "default"} hint="at or below minimum" />
         <Stat label="Stock value" value={formatINR(value)} hint="quantity × cost per unit" />
-        <Stat label="Counted this month" value={rows.filter((m) => m.lastCountAt && m.lastCountAt.toISOString().slice(0, 7) === today.slice(0, 7)).length} hint={`of ${rows.length}`} />
+        <Stat label="Short for the plan" value={shortForPlan.length} tone={shortForPlan.length ? "warning" : "default"} hint={planned.length ? "across open production plans" : "nothing planned"} />
       </StatGrid>
       <form className="mb-3 flex items-center gap-2" action="/factory/materials">
         {showInactive ? <input type="hidden" name="all" value="1" /> : null}
@@ -73,6 +78,7 @@ export default async function MaterialsPage(props: PageProps<"/factory/materials
               <TableHead>Code</TableHead>
               <TableHead>Material</TableHead>
               <TableHead className="text-right">In stock</TableHead>
+              <TableHead className="text-right">Needed for the plan</TableHead>
               <TableHead className="hidden text-right sm:table-cell">Minimum</TableHead>
               <TableHead className="hidden text-right md:table-cell">Cost / unit</TableHead>
               <TableHead className="hidden text-right lg:table-cell">Last count</TableHead>
@@ -82,7 +88,7 @@ export default async function MaterialsPage(props: PageProps<"/factory/materials
           </TableHeader>
           <TableBody>
             {rows.length === 0 ? (
-              <TableEmpty colSpan={8}>No materials match.</TableEmpty>
+              <TableEmpty colSpan={9}>No materials match.</TableEmpty>
             ) : (
               rows.map((m) => {
                 const isLow = m.minQty > 0 && m.qty <= m.minQty;
@@ -95,6 +101,16 @@ export default async function MaterialsPage(props: PageProps<"/factory/materials
                       </Link>
                     </TableCell>
                     <TableCell className={cn("tabular text-right font-semibold", isLow && "text-warning")}>{formatQty(m.qty, m.unit)}</TableCell>
+                    <TableCell className="tabular text-right">
+                      {needed.get(m.id) ? (
+                        <>
+                          {formatQty(needed.get(m.id)!.required)}
+                          {needed.get(m.id)!.short ? <span className="block text-xs font-medium text-warning">{formatQty(needed.get(m.id)!.short)} short</span> : null}
+                        </>
+                      ) : (
+                        <span className="text-muted-foreground">—</span>
+                      )}
+                    </TableCell>
                     <TableCell className="tabular hidden text-right text-muted-foreground sm:table-cell">{m.minQty ? formatQty(m.minQty) : "—"}</TableCell>
                     <TableCell className="tabular hidden text-right md:table-cell">{m.costP ? formatINR(m.costP, { exact: true }) : "—"}</TableCell>
                     <TableCell className="hidden text-right text-muted-foreground lg:table-cell">{m.lastCountAt ? formatDate(m.lastCountAt) : "never"}</TableCell>

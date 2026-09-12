@@ -7,6 +7,7 @@ Built with Next.js 16 (App Router, server actions), TypeScript, Tailwind v4 + sh
 ## What it automates
 
 - **Shopify → books.** Orders from babygambling.in sync in (webhooks + a background sync every 15 min). Each order becomes a sale, each refund a return, cancellations void the sale (and any refund that was part of the cancellation), and finished stock is deducted as Shopify marks items fulfilled, so split shipments deduct in parts. For locally shipped parcels, cancellation and restock messages do not restore stock; physical receipt and inspection handle their return. Shopify-only orders retain the existing stock-sync behavior.
+- **Plan → materials → production.** A production plan says what to make and by when. It prices the batch from the recipe in use and shows, material by material, whether the store can cover it before anyone starts cutting. Recording production against a plan caps the quantity at what is left, and the plan closes itself once QC has accepted the planned pieces. Voiding accepted output reopens it.
 - **Recipes → raw materials.** A production entry ("made 10 nest beds") consumes its material recipe and waits for QC. Only accepted units enter finished stock. Entries can link to a website order line; rejections reopen the quantity to make. An active recipe is required unless a note explains how material use is recorded separately.
 - **Dispatch → stock → Shopify.** Marking a parcel shipped deducts stock, and for website orders marks the order fulfilled in Shopify with the tracking number so the customer is notified. QC and accounts billing verification are required before packing; packing is required before shipping. Shipped parcels use a return/RTO flow: requested → in transit → received → inspected. Only inspected saleable pieces return to stock; missing and damaged pieces remain visible. Unshipped parcels may be cancelled. Website orders turn into a dispatch once every item is mapped.
 - **Stock → website.** With "keep website stock in sync" on for a store, every stock change here is pushed to Shopify as the on-hand quantity; Shopify subtracts units committed to open orders itself, so the website never shows more than can actually ship.
@@ -21,7 +22,7 @@ Built with Next.js 16 (App Router, server actions), TypeScript, Tailwind v4 + sh
 | Home | Today, this month, 30-day chart, channel split, website orders, factory today, low stock, recent entries |
 | Sales & money | Sales & expenses ledger (brand / factory books) with bill photos attached to entries, Website orders, Payments (cash & bank, receivables, payables), Customers & vendors, Reports |
 | Stock & dispatch | Finished stock, Products (catalogue), Dispatch with photos and printable challan |
-| Factory | Daily register (production + tap-to-mark attendance), Production history and QC queue, order production progress, Raw materials, Material recipes, Attendance grid with wages, Staff, Job work with printable challan |
+| Factory | Daily register (production + tap-to-mark attendance), Production plan with material shortages, Production history with per-product and per-worker cost, order production progress, Raw materials, Material recipes, Attendance grid with wages, Staff, Job work with printable challan |
 | Admin | Company details, Logins, Shopify connection, Lists & brands |
 
 ## Run locally
@@ -41,7 +42,7 @@ First login: `owner@trupaths.in` / `change-me-now` (or whatever `SEED_OWNER_EMAI
 ## Tests
 
 - `pnpm test` runs the unit tests (Vitest): money and date helpers, role permissions, form parsing, the website-order stock planner, Shopify signature checks and secret encryption.
-- `pnpm test:e2e` is the browser test. With a built server running (`PORT=3100 pnpm start`) and Google Chrome installed, it signs in, adds sales and expenses with GST, records production, marks attendance, creates a dispatch, bills a job work order in two batches, and checks role restrictions. It writes test data, so run it against a scratch database. It exits non-zero on any failure.
+- `pnpm test:e2e` is the browser test. With a built server running (`PORT=3100 pnpm start`) and Google Chrome installed, it signs in, adds sales and expenses with GST, plans a batch and checks its materials, records production, marks attendance, creates a dispatch, bills a job work order in two batches, and checks role restrictions. It writes test data, so run it against a scratch database. It exits non-zero on any failure.
 - `ALLOW_DB_TESTS=1 pnpm test:integration` verifies invoice issuance, counter concurrency, ledger updates, discounts, stock retries and cross-book payment guards. It requires a disposable localhost PostgreSQL database with migrations and seed applied. It also creates fixtures for `E2E_INVOICES=1 pnpm test:e2e`.
 - `E2E_INVOICE_ONLY=1 E2E_INVOICES=1 pnpm test:e2e` runs the focused invoice browser journey after those fixtures exist. `E2E_INVOICE_PDF=/absolute/path/preview.pdf` optionally saves its draft as an A4 PDF.
 - `E2E_DASHBOARD_ONLY=1 pnpm test:e2e` checks the brand filter, mobile layout and ledger entry defaults. `E2E_CREDIT_PDF=/absolute/path/credit-note.pdf` optionally exports the test credit note when invoice checks are enabled.
@@ -51,7 +52,7 @@ Useful scripts: `pnpm db:generate` (new migration after editing `src/db/schema.t
 
 ## Production, dispatch and physical returns
 
-See [operations workflow and validation](docs/operations-workflow.md) for the QC, billing, packing and RTO steps, migration behavior and remaining integration boundaries. Migration 0012 preserves stock from older production entries; it does not replay their stock movements.
+See [factory management](docs/factory-management.md) for planning, shortages and production costing, and [operations workflow and validation](docs/operations-workflow.md) for the QC, billing, packing and RTO steps, migration behavior and remaining integration boundaries. Migration 0012 preserves stock from older production entries; it does not replay their stock movements.
 
 ## Tax invoices
 
@@ -136,6 +137,7 @@ The in-process scheduler (`SHOPIFY_SYNC_MINUTES`) is enough on Render. If you ho
 - Job work bills cover the accepted pieces received since the previous bill (`billed_qty` on the order), so a job worker delivering in batches is billed per batch.
 - Synced records carry a `source_ref` (e.g. `shopify:order:123:sale`) that makes repeated syncs idempotent.
 - Photos and PDFs (dispatch photos, job work files, bills on ledger entries) are stored in Postgres (`uploads`), resized in the browser first, and served only to roles that may view the module they belong to. Move to S3/R2 if volumes grow.
+- Production plans estimate material and labour cost from the recipe in use at the time of planning; the production entry records what actually left the store. A plan never moves stock by itself.
 - Raw-material movements carry the date entered in the dialog (`work_date`), so backdated usage and counts show under the right day; `created_at` still records when it was typed in.
 
 ## Backups
