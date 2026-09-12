@@ -1,6 +1,6 @@
 import "server-only";
 import { cache } from "react";
-import { cookies } from "next/headers";
+import { cookies, headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { createHash, randomBytes } from "node:crypto";
 import { hashPassword, verifyPassword } from "@/lib/password";
@@ -16,12 +16,22 @@ export { hashPassword, verifyPassword };
 
 const tokenId = (token: string) => createHash("sha256").update(token).digest("hex");
 
-export async function createSession(userId: string, userAgent?: string | null) {
+/** Start a session and return its token. The browser stores it in a cookie; the phone app keeps it itself. */
+export async function issueSession(userId: string, userAgent?: string | null) {
   const token = randomBytes(32).toString("base64url");
   const expiresAt = new Date(Date.now() + SESSION_DAYS * 86_400_000);
   await db.insert(sessions).values({ id: tokenId(token), userId, expiresAt, userAgent: userAgent ?? null });
   // opportunistic cleanup of expired sessions
   await db.delete(sessions).where(lt(sessions.expiresAt, new Date()));
+  return { token, expiresAt };
+}
+
+export async function revokeSessionToken(token: string) {
+  await db.delete(sessions).where(eq(sessions.id, tokenId(token)));
+}
+
+export async function createSession(userId: string, userAgent?: string | null) {
+  const { token, expiresAt } = await issueSession(userId, userAgent);
   const store = await cookies();
   store.set(SESSION_COOKIE, token, {
     httpOnly: true,
@@ -46,9 +56,18 @@ export async function destroySession() {
   store.delete(SESSION_COOKIE);
 }
 
+/** The session token for this request, from the cookie or a bearer header (memoised per request). */
+export const sessionToken = cache(async (): Promise<string | null> => {
+  const cookie = (await cookies()).get(SESSION_COOKIE)?.value;
+  if (cookie) return cookie;
+  // the phone app has no cookie jar: it sends the same session token as a bearer token
+  const auth = (await headers()).get("authorization");
+  return auth?.startsWith("Bearer ") ? auth.slice(7).trim() || null : null;
+});
+
 /** Current signed-in user (memoised per request). */
 export const getCurrentUser = cache(async (): Promise<SafeUser | null> => {
-  const token = (await cookies()).get(SESSION_COOKIE)?.value;
+  const token = await sessionToken();
   if (!token) return null;
   const rows = await db
     .select({
